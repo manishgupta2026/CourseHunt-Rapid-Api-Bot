@@ -44,14 +44,27 @@ class UdemyBot:
         return None
 
     def get_courses(self, page=0):
-        return self._make_request(f"{self.base_path}?page={page}")
+        return self._make_request(f"{self.base_path}?page={page}") or []
 
     def get_total_courses(self):
+        """Get total courses count as integer"""
         result = self._make_request(f"{self.base_path}count")
-        return result.get('count', 0) if result else 0
+        if not result:
+            return 0
+            
+        try:
+            # Handle different possible response formats
+            if isinstance(result, dict):
+                return int(result.get('count', 0))
+            elif isinstance(result, int):
+                return result
+            else:
+                return int(result)
+        except (TypeError, ValueError):
+            return 0
 
     def search_courses(self, query, page=0):
-        return self._make_request(f"{self.base_path}search?s={query}&page={page}")
+        return self._make_request(f"{self.base_path}search?s={query}&page={page}") or []
 
 # Telegram Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -78,7 +91,7 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         page = int(context.args[0]) if context.args else 0
-    except ValueError:
+    except (ValueError, IndexError):
         page = 0
     
     courses = bot.get_courses(page)
@@ -87,7 +100,7 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
         
     total = bot.get_total_courses()
-    total_pages = (total // bot.per_page) + (1 if total % bot.per_page else 0)
+    total_pages = (total // bot.per_page) + (1 if total % bot.per_page else 0) if total > 0 else 1
     
     response = f"📖 <b>Page {page+1}/{total_pages}</b>\n\n"
     for i, course in enumerate(courses, 1):
@@ -156,8 +169,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if command == "list":
             page = int(data[1])
             courses = bot.get_courses(page)
+            if not courses:
+                await query.edit_message_text("⚠️ Failed to fetch courses. Please try again later.")
+                return
+                
             total = bot.get_total_courses()
-            total_pages = (total // bot.per_page) + (1 if total % bot.per_page else 0)
+            total_pages = (total // bot.per_page) + (1 if total % bot.per_page else 0) if total > 0 else 1
             
             response = f"📖 <b>Page {page+1}/{total_pages}</b>\n\n"
             for i, course in enumerate(courses, 1):
@@ -206,6 +223,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"Error handling callback: {str(e)}")
         await query.edit_message_text("⚠️ Error loading content. Please try again.")
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"Update {update} caused error {context.error}")
+    if update.message:
+        await update.message.reply_text("⚠️ An error occurred. Please try again later.")
+
 def main():
     # Create Telegram Application
     application = Application.builder().token(os.environ['TELEGRAM_TOKEN']).build()
@@ -217,6 +239,7 @@ def main():
     application.add_handler(CommandHandler("list", list_courses))
     application.add_handler(CommandHandler("search", search_courses))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_error_handler(error_handler)
     
     # Start bot
     print("Bot is running...")
