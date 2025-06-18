@@ -4,6 +4,7 @@ import json
 from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from datetime import time, timezone
 
 class UdemyBot:
     def __init__(self, api_keys):
@@ -258,6 +259,43 @@ async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n\n"
         await update.message.reply_text(plain_response)
 
+def get_top_courses(self):
+        """Get top 20 courses without pagination"""
+        return self._make_request(f"{self.base_path}?page=0&limit=20") or []
+
+async def send_daily_courses(context: ContextTypes.DEFAULT_TYPE):
+    api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
+    bot = UdemyBot(api_keys)
+    courses = bot.get_top_courses()
+    
+    if not courses:
+        print("Failed to fetch courses for daily update")
+        return
+    
+    # Prepare raw URLs only (one per line)
+    urls = "\n".join([
+        course['coupon'] for course in courses 
+        if course.get('coupon') and course['coupon'].startswith('http')
+    ])
+    
+    if not urls:
+        print("No valid URLs found")
+        return
+    
+    # Send to the target bot (ID: 7826136340)
+    target_bot_id = 7826136340
+    try:
+        await context.bot.send_message(
+            chat_id=target_bot_id,
+            text=urls,
+            disable_web_page_preview=True,
+            disable_notification=True
+        )
+        print(f"Successfully sent {len(urls.splitlines())} URLs to bot {target_bot_id}")
+    except Exception as e:
+        print(f"Failed to send daily courses to bot: {str(e)}")
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -357,6 +395,18 @@ def main():
     application.add_handler(CommandHandler("search", search_courses))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_error_handler(error_handler)
+
+    # Set up daily job (1 AM IST = 7:30 PM UTC)
+    job_queue = application.job_queue
+    job_queue.run_daily(
+        send_daily_courses,
+        time(hour=19, minute=30, tzinfo=timezone.utc),  # 7:30 PM UTC = 1 AM IST
+        days=(0, 1, 2, 3, 4, 5, 6)  # Every day
+    )
+
+    # Start bot
+    print("Bot is running with daily course delivery to target bot...")
+    application.run_polling()
     
     # Start bot
     print("Bot is running...")
