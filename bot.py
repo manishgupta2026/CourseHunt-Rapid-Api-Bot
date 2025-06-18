@@ -1,7 +1,7 @@
 import os
 import http.client
 import json
-import random
+from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
@@ -47,26 +47,24 @@ class UdemyBot:
         return self._make_request(f"{self.base_path}?page={page}") or []
 
     def get_total_courses(self):
-        """Get total courses count as integer"""
         result = self._make_request(f"{self.base_path}count")
         if not result:
             return 0
-            
         try:
-            # Handle different possible response formats
             if isinstance(result, dict):
                 return int(result.get('count', 0))
             elif isinstance(result, int):
                 return result
-            else:
-                return int(result)
+            return int(result)
         except (TypeError, ValueError):
             return 0
 
     def search_courses(self, query, page=0):
         return self._make_request(f"{self.base_path}search?s={query}&page={page}") or []
 
-# Telegram Bot Handlers
+def sanitize_html(text):
+    return escape(text).replace("&amp;", "&") if text else ""
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """
 🎓 <b>Udemy Courses Bot</b> 🚀
@@ -104,8 +102,16 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     response = f"📖 <b>Page {page+1}/{total_pages}</b>\n\n"
     for i, course in enumerate(courses, 1):
-        response += f"{i}. <a href='{course['coupon']}'>{course['title']}</a>\n"
-        response += f"   ⭐ {course['rating']} | 🕒 {course['duration']}h | 🏷️ {course['category']}\n\n"
+        title = sanitize_html(course.get('title', 'Untitled Course'))
+        coupon = course.get('coupon', '#')
+        rating = course.get('rating', 'N/A')
+        duration = course.get('duration', 'N/A')
+        category = sanitize_html(course.get('category', 'Unknown'))
+        
+        response += f"<b>{i}. {title}</b>\n"
+        response += f"🔗 <code>{coupon}</code>\n"
+        response += f"⭐ Rating: {rating} | 🕒 Duration: {duration}h\n"
+        response += f"🏷️ Category: {category}\n\n"
     
     keyboard = []
     if page > 0:
@@ -113,11 +119,21 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if page < total_pages - 1:
         keyboard.append(InlineKeyboardButton("Next ➡️", callback_data=f"list:{page+1}"))
     
-    await update.message.reply_html(
-        response,
-        reply_markup=InlineKeyboardMarkup([keyboard]) if keyboard else None,
-        disable_web_page_preview=True
-    )
+    try:
+        await update.message.reply_html(
+            response,
+            reply_markup=InlineKeyboardMarkup([keyboard]) if keyboard else None,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Failed to send message: {str(e)}")
+        plain_response = f"Page {page+1}/{total_pages}\n\n"
+        for i, course in enumerate(courses, 1):
+            plain_response += f"{i}. {course.get('title', 'Untitled Course')}\n"
+            plain_response += f"URL: {course.get('coupon', 'Not available')}\n"
+            plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n"
+            plain_response += f"Category: {course.get('category', 'Unknown')}\n\n"
+        await update.message.reply_text(plain_response)
 
 async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
@@ -127,7 +143,6 @@ async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔍 Please provide search term: /search react")
         return
     
-    # Parse page number if exists
     try:
         page = int(context.args[-1])
         query = " ".join(context.args[:-1])
@@ -142,25 +157,40 @@ async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     response = f"🔍 <b>Results for '{query}' (Page {page+1})</b>\n\n"
     for i, course in enumerate(courses, 1):
-        response += f"{i}. <a href='{course['coupon']}'>{course['title']}</a>\n"
-        response += f"   ⭐ {course['rating']} | 🕒 {course['duration']}h\n\n"
+        title = sanitize_html(course.get('title', 'Untitled Course'))
+        coupon = course.get('coupon', '#')
+        rating = course.get('rating', 'N/A')
+        duration = course.get('duration', 'N/A')
+        
+        response += f"<b>{i}. {title}</b>\n"
+        response += f"🔗 <code>{coupon}</code>\n"
+        response += f"⭐ Rating: {rating} | 🕒 Duration: {duration}h\n\n"
     
     keyboard = []
     if page > 0:
         keyboard.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search:{query}:{page-1}"))
     keyboard.append(InlineKeyboardButton("Next ➡️", callback_data=f"search:{query}:{page+1}"))
     
-    await update.message.reply_html(
-        response,
-        reply_markup=InlineKeyboardMarkup([keyboard]),
-        disable_web_page_preview=True
-    )
+    try:
+        await update.message.reply_html(
+            response,
+            reply_markup=InlineKeyboardMarkup([keyboard]),
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Failed to send message: {str(e)}")
+        plain_response = f"Results for '{query}' (Page {page+1})\n\n"
+        for i, course in enumerate(courses, 1):
+            plain_response += f"{i}. {course.get('title', 'Untitled Course')}\n"
+            plain_response += f"URL: {course.get('coupon', 'Not available')}\n"
+            plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n\n"
+        await update.message.reply_text(plain_response)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    data = query.data.split(":")
+    data = query.data.split(':')
     command = data[0]
     api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
     bot = UdemyBot(api_keys)
@@ -178,8 +208,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             response = f"📖 <b>Page {page+1}/{total_pages}</b>\n\n"
             for i, course in enumerate(courses, 1):
-                response += f"{i}. <a href='{course['coupon']}'>{course['title']}</a>\n"
-                response += f"   ⭐ {course['rating']} | 🕒 {course['duration']}h\n\n"
+                title = sanitize_html(course.get('title', 'Untitled Course'))
+                coupon = course.get('coupon', '#')
+                rating = course.get('rating', 'N/A')
+                duration = course.get('duration', 'N/A')
+                category = sanitize_html(course.get('category', 'Unknown'))
+                
+                response += f"<b>{i}. {title}</b>\n"
+                response += f"🔗 <code>{coupon}</code>\n"
+                response += f"⭐ Rating: {rating} | 🕒 Duration: {duration}h\n"
+                response += f"🏷️ Category: {category}\n\n"
             
             keyboard = []
             if page > 0:
@@ -205,7 +243,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
             response = f"🔍 <b>Results for '{search_query}' (Page {page+1})</b>\n\n"
             for i, course in enumerate(courses, 1):
-                response += f"{i}. <a href='{course['coupon']}'>{course['title']}</a>\n\n"
+                title = sanitize_html(course.get('title', 'Untitled Course'))
+                coupon = course.get('coupon', '#')
+                rating = course.get('rating', 'N/A')
+                duration = course.get('duration', 'N/A')
+                
+                response += f"<b>{i}. {title}</b>\n"
+                response += f"🔗 <code>{coupon}</code>\n"
+                response += f"⭐ Rating: {rating} | 🕒 Duration: {duration}h\n\n"
             
             keyboard = []
             if page > 0:
