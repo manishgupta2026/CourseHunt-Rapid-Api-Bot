@@ -1,8 +1,3 @@
-Absolutely! Here's **everything combined into a complete `README.md` file**, ready to be copied and used in your project:
-
----
-
-````markdown
 # 📚 CourseHunt Rapid API Bot
 
 A powerful **Telegram bot** for finding and sharing online courses across multiple platforms using **Rapid API**. The bot searches courses from various platforms, provides detailed information, and offers a seamless way to discover educational content.
@@ -45,13 +40,13 @@ A powerful **Telegram bot** for finding and sharing online courses across multip
 
 ## 📋 Commands
 
-| Command         | Description                                      |
-|----------------|--------------------------------------------------|
-| `/start`        | Initialize the bot and get welcome information   |
-| `/help`         | Display available commands and usage instructions |
-| `/search [query]` | Search for courses with the specified query    |
-| `/filter`       | Access filtering options for your search results |
-| `/popular`      | View trending and popular courses                |
+| Command | Description |
+|---------|-------------|
+| `/start` | Initialize the bot and get welcome information |
+| `/help` | Display available commands and usage instructions |
+| `/search [query]` | Search for courses with the specified query |
+| `/filter` | Access filtering options for your search results |
+| `/popular` | View trending and popular courses |
 
 ---
 
@@ -75,9 +70,9 @@ A powerful **Telegram bot** for finding and sharing online courses across multip
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/your-username/coursehunt-bot.git
-   cd coursehunt-bot
-````
+   git clone https://github.com/manishgupta2026/CourseHunt-Rapid-Api-Bot.git
+   cd CourseHunt-Rapid-Api-Bot
+   ```
 
 2. **Install dependencies:**
 
@@ -163,4 +158,3 @@ Created by **Manish Gupta** for CourseHunt
 ---
 
 Let me know if you’d also like a sample `.env` file or a [deploy-to-Heroku button](f) added directly in the README!
-```
