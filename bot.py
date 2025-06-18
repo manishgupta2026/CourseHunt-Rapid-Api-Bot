@@ -101,6 +101,8 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_pages = (total // bot.per_page) + (1 if total % bot.per_page else 0) if total > 0 else 1
     
     response = f"📖 <b>Page {page+1}/{total_pages}</b>\n\n"
+    url_list = "🔗 <b>Raw URLs:</b>\n"
+    
     for i, course in enumerate(courses, 1):
         title = sanitize_html(course.get('title', 'Untitled Course'))
         coupon = course.get('coupon', '#')
@@ -109,9 +111,10 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = sanitize_html(course.get('category', 'Unknown'))
         
         response += f"<b>{i}. {title}</b>\n"
-        response += f"🔗 <code>{coupon}</code>\n"
         response += f"⭐ Rating: {rating} | 🕒 Duration: {duration}h\n"
         response += f"🏷️ Category: {category}\n\n"
+        
+        url_list += f"{i}. <code>{coupon}</code>\n"
     
     keyboard = []
     if page > 0:
@@ -120,19 +123,88 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(InlineKeyboardButton("Next ➡️", callback_data=f"list:{page+1}"))
     
     try:
+        # Send main course info
         await update.message.reply_html(
             response,
             reply_markup=InlineKeyboardMarkup([keyboard]) if keyboard else None,
             disable_web_page_preview=True
         )
+        
+        # Send raw URLs separately
+        await update.message.reply_html(
+            url_list,
+            disable_web_page_preview=True
+        )
     except Exception as e:
         print(f"Failed to send message: {str(e)}")
+        # Fallback implementation
         plain_response = f"Page {page+1}/{total_pages}\n\n"
         for i, course in enumerate(courses, 1):
             plain_response += f"{i}. {course.get('title', 'Untitled Course')}\n"
-            plain_response += f"URL: {course.get('coupon', 'Not available')}\n"
             plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n"
-            plain_response += f"Category: {course.get('category', 'Unknown')}\n\n"
+            plain_response += f"Category: {course.get('category', 'Unknown')}\n"
+            plain_response += f"URL: {course.get('coupon', 'Not available')}\n\n"
+        await update.message.reply_text(plain_response)
+
+async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
+    bot = UdemyBot(api_keys)
+    
+    if not context.args:
+        await update.message.reply_text("🔍 Please provide search term: /search react")
+        return
+    
+    try:
+        page = int(context.args[-1])
+        query = " ".join(context.args[:-1])
+    except ValueError:
+        page = 0
+        query = " ".join(context.args)
+    
+    courses = bot.search_courses(query, page)
+    if not courses:
+        await update.message.reply_text("⚠️ No courses found or API error. Try different search term.")
+        return
+    
+    response = f"🔍 <b>Results for '{query}' (Page {page+1})</b>\n\n"
+    url_list = "🔗 <b>Raw URLs:</b>\n"
+    
+    for i, course in enumerate(courses, 1):
+        title = sanitize_html(course.get('title', 'Untitled Course'))
+        coupon = course.get('coupon', '#')
+        rating = course.get('rating', 'N/A')
+        duration = course.get('duration', 'N/A')
+        
+        response += f"<b>{i}. {title}</b>\n"
+        response += f"⭐ Rating: {rating} | 🕒 Duration: {duration}h\n\n"
+        
+        url_list += f"{i}. <code>{coupon}</code>\n"
+    
+    keyboard = []
+    if page > 0:
+        keyboard.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search:{query}:{page-1}"))
+    keyboard.append(InlineKeyboardButton("Next ➡️", callback_data=f"search:{query}:{page+1}"))
+    
+    try:
+        # Send main course info
+        await update.message.reply_html(
+            response,
+            reply_markup=InlineKeyboardMarkup([keyboard]),
+            disable_web_page_preview=True
+        )
+        
+        # Send raw URLs separately
+        await update.message.reply_html(
+            url_list,
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Failed to send message: {str(e)}")
+        plain_response = f"Results for '{query}' (Page {page+1})\n\n"
+        for i, course in enumerate(courses, 1):
+            plain_response += f"{i}. {course.get('title', 'Untitled Course')}\n"
+            plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n"
+            plain_response += f"URL: {course.get('coupon', 'Not available')}\n\n"
         await update.message.reply_text(plain_response)
 
 async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
