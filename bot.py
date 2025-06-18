@@ -75,6 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /count - Show total course count
 /search [query] - Search courses (e.g. /search python)
 /help - Show this help
+/testbot - Send a test message to the target bot
     """
     await update.message.reply_html(help_text)
 
@@ -295,6 +296,22 @@ async def send_daily_courses(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         print(f"Failed to send daily courses to bot: {str(e)}")
 
+async def test_bot_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    target_bot_id = 7826136340
+    test_message = "🔍 This is a test message from your Udemy bot"
+    
+    try:
+        await context.bot.send_message(
+            chat_id=target_bot_id,
+            text=test_message,
+            disable_notification=True
+        )
+        await update.message.reply_text("✅ Success! Test message sent to the target bot.")
+    except Exception as e:
+        error_msg = f"❌ Failed to send message to bot: {str(e)}"
+        await update.message.reply_text(error_msg)
+        print(error_msg)
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -395,6 +412,7 @@ def main():
     application.add_handler(CommandHandler("search", search_courses))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_error_handler(error_handler)
+    application.add_handler(CommandHandler("testbot", test_bot_message))
 
     # Set up daily job (1 AM IST = 7:30 PM UTC)
     job_queue = application.job_queue
