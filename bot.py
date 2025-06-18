@@ -260,58 +260,36 @@ async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n\n"
         await update.message.reply_text(plain_response)
 
-def get_top_courses(self):
-        """Get top 20 courses without pagination"""
-        return self._make_request(f"{self.base_path}?page=0&limit=20") or []
-
-async def send_daily_courses(context: ContextTypes.DEFAULT_TYPE):
-    api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
-    bot = UdemyBot(api_keys)
-    courses = bot.get_top_courses()
-    
-    if not courses:
-        print("Failed to fetch courses for daily update")
-        return
-    
-    # Prepare raw URLs only (one per line)
-    urls = "\n".join([
-        course['coupon'] for course in courses 
-        if course.get('coupon') and course['coupon'].startswith('http')
-    ])
-    
-    if not urls:
-        print("No valid URLs found")
-        return
-    
-    # Send to the target bot (ID: 7826136340)
+async def initialize_bot_chat(context: ContextTypes.DEFAULT_TYPE):
+    """Force-create a chat session between bots"""
     target_bot_id = 7826136340
     try:
+        # Send a dummy message to establish chat
+        await context.bot.send_message(
+            chat_id=target_bot_id,
+            text="🤖 Chat session initialized",
+            disable_notification=True
+        )
+        print("Bot chat session established successfully")
+    except Exception as e:
+        print(f"Initialization failed: {str(e)}")
+
+async def send_daily_courses(context: ContextTypes.DEFAULT_TYPE):
+    target_bot_id = 7826136340
+    urls = "\n".join(get_top_20_courses())  # Your course fetching logic
+    
+    try:
+        # Attempt to send URLs
         await context.bot.send_message(
             chat_id=target_bot_id,
             text=urls,
-            disable_web_page_preview=True,
-            disable_notification=True
+            disable_notification=True,
+            disable_web_page_preview=True
         )
-        print(f"Successfully sent {len(urls.splitlines())} URLs to bot {target_bot_id}")
+        print(f"Successfully sent to bot {target_bot_id}")
     except Exception as e:
-        print(f"Failed to send daily courses to bot: {str(e)}")
-
-async def test_bot_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    target_bot_id = 7826136340
-    test_message = "🔍 This is a test message from your Udemy bot"
-    
-    try:
-        await context.bot.send_message(
-            chat_id=target_bot_id,
-            text=test_message,
-            disable_notification=True
-        )
-        await update.message.reply_text("✅ Success! Test message sent to the target bot.")
-    except Exception as e:
-        error_msg = f"❌ Failed to send message to bot: {str(e)}"
-        await update.message.reply_text(error_msg)
-        print(error_msg)
-
+        print(f"Failed to send: {str(e)}\nReinitializing chat...")
+        await initialize_bot_chat(context)  # Auto-recover chat session
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -403,6 +381,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     # Create Telegram Application
     application = Application.builder().token(os.environ['TELEGRAM_TOKEN']).build()
+
+    application.job_queue.run_once(initialize_bot_chat, when=0)
     
     # Add handlers
     application.add_handler(CommandHandler("start", start))
@@ -414,12 +394,11 @@ def main():
     application.add_error_handler(error_handler)
     application.add_handler(CommandHandler("testbot", test_bot_message))
 
-    # Set up daily job (1 AM IST = 7:30 PM UTC)
-    job_queue = application.job_queue
-    job_queue.run_daily(
+    # Daily 1AM IST (7:30PM UTC) delivery
+    application.job_queue.run_daily(
         send_daily_courses,
-        time(hour=19, minute=30, tzinfo=timezone.utc),  # 7:30 PM UTC = 1 AM IST
-        days=(0, 1, 2, 3, 4, 5, 6)  # Every day
+        time(hour=19, minute=30, tzinfo=timezone.utc),
+        days=tuple(range(7))
     )
 
     # Start bot
