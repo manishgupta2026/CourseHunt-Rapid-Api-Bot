@@ -153,6 +153,5 @@ See the [LICENSE](LICENSE) file for details.
 Created by **Manish Gupta** for CourseHunt
 **Last updated:** June 18, 2025
 
-```
 
 
