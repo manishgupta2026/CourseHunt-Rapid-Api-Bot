@@ -155,6 +155,4 @@ Created by **Manish Gupta** for CourseHunt
 
 ```
 
----
 
-Let me know if you’d also like a sample `.env` file or a [deploy-to-Heroku button](f) added directly in the README!
