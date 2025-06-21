@@ -2,9 +2,16 @@ import os
 import http.client
 import json
 from html import escape
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from datetime import time, timezone
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters
+)
 
 class UdemyBot:
     def __init__(self, api_keys):
@@ -62,6 +69,10 @@ class UdemyBot:
 
     def search_courses(self, query, page=0):
         return self._make_request(f"{self.base_path}search?s={query}&page={page}") or []
+    
+    def get_top_courses(self):
+        """Get top 20 courses without pagination"""
+        return self._make_request(f"{self.base_path}?page=0&limit=20") or []
 
 def sanitize_html(text):
     return escape(text).replace("&amp;", "&") if text else ""
@@ -75,7 +86,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /count - Show total course count
 /search [query] - Search courses (e.g. /search python)
 /help - Show this help
-/testbot - Send a test message to the target bot
     """
     await update.message.reply_html(help_text)
 
@@ -103,8 +113,6 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_pages = (total // bot.per_page) + (1 if total % bot.per_page else 0) if total > 0 else 1
     
     response = f"📖 <b>Page {page+1}/{total_pages}</b>\n\n"
-    url_list = "🔗 <b>Raw URLs:</b>\n"
-    
     for i, course in enumerate(courses, 1):
         title = sanitize_html(course.get('title', 'Untitled Course'))
         coupon = course.get('coupon', '#')
@@ -113,10 +121,9 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = sanitize_html(course.get('category', 'Unknown'))
         
         response += f"<b>{i}. {title}</b>\n"
+        response += f"🔗 <code>{coupon}</code>\n"
         response += f"⭐ Rating: {rating} | 🕒 Duration: {duration}h\n"
         response += f"🏷️ Category: {category}\n\n"
-        
-        url_list += f"{i}. <code>{coupon}</code>\n"
     
     keyboard = []
     if page > 0:
@@ -125,88 +132,19 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(InlineKeyboardButton("Next ➡️", callback_data=f"list:{page+1}"))
     
     try:
-        # Send main course info
         await update.message.reply_html(
             response,
             reply_markup=InlineKeyboardMarkup([keyboard]) if keyboard else None,
             disable_web_page_preview=True
         )
-        
-        # Send raw URLs separately
-        await update.message.reply_html(
-            url_list,
-            disable_web_page_preview=True
-        )
     except Exception as e:
         print(f"Failed to send message: {str(e)}")
-        # Fallback implementation
         plain_response = f"Page {page+1}/{total_pages}\n\n"
         for i, course in enumerate(courses, 1):
             plain_response += f"{i}. {course.get('title', 'Untitled Course')}\n"
+            plain_response += f"URL: {course.get('coupon', 'Not available')}\n"
             plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n"
-            plain_response += f"Category: {course.get('category', 'Unknown')}\n"
-            plain_response += f"URL: {course.get('coupon', 'Not available')}\n\n"
-        await update.message.reply_text(plain_response)
-
-async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
-    bot = UdemyBot(api_keys)
-    
-    if not context.args:
-        await update.message.reply_text("🔍 Please provide search term: /search react")
-        return
-    
-    try:
-        page = int(context.args[-1])
-        query = " ".join(context.args[:-1])
-    except ValueError:
-        page = 0
-        query = " ".join(context.args)
-    
-    courses = bot.search_courses(query, page)
-    if not courses:
-        await update.message.reply_text("⚠️ No courses found or API error. Try different search term.")
-        return
-    
-    response = f"🔍 <b>Results for '{query}' (Page {page+1})</b>\n\n"
-    url_list = "🔗 <b>Raw URLs:</b>\n"
-    
-    for i, course in enumerate(courses, 1):
-        title = sanitize_html(course.get('title', 'Untitled Course'))
-        coupon = course.get('coupon', '#')
-        rating = course.get('rating', 'N/A')
-        duration = course.get('duration', 'N/A')
-        
-        response += f"<b>{i}. {title}</b>\n"
-        response += f"⭐ Rating: {rating} | 🕒 Duration: {duration}h\n\n"
-        
-        url_list += f"{i}. <code>{coupon}</code>\n"
-    
-    keyboard = []
-    if page > 0:
-        keyboard.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"search:{query}:{page-1}"))
-    keyboard.append(InlineKeyboardButton("Next ➡️", callback_data=f"search:{query}:{page+1}"))
-    
-    try:
-        # Send main course info
-        await update.message.reply_html(
-            response,
-            reply_markup=InlineKeyboardMarkup([keyboard]),
-            disable_web_page_preview=True
-        )
-        
-        # Send raw URLs separately
-        await update.message.reply_html(
-            url_list,
-            disable_web_page_preview=True
-        )
-    except Exception as e:
-        print(f"Failed to send message: {str(e)}")
-        plain_response = f"Results for '{query}' (Page {page+1})\n\n"
-        for i, course in enumerate(courses, 1):
-            plain_response += f"{i}. {course.get('title', 'Untitled Course')}\n"
-            plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n"
-            plain_response += f"URL: {course.get('coupon', 'Not available')}\n\n"
+            plain_response += f"Category: {course.get('category', 'Unknown')}\n\n"
         await update.message.reply_text(plain_response)
 
 async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -260,36 +198,39 @@ async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n\n"
         await update.message.reply_text(plain_response)
 
-async def initialize_bot_chat(context: ContextTypes.DEFAULT_TYPE):
-    """Force-create a chat session between bots"""
-    target_bot_id = 7826136340
-    try:
-        # Send a dummy message to establish chat
-        await context.bot.send_message(
-            chat_id=target_bot_id,
-            text="🤖 Chat session initialized",
-            disable_notification=True
-        )
-        print("Bot chat session established successfully")
-    except Exception as e:
-        print(f"Initialization failed: {str(e)}")
-
-async def send_daily_courses(context: ContextTypes.DEFAULT_TYPE):
-    target_bot_id = 7826136340
-    urls = "\n".join(get_top_20_courses())  # Your course fetching logic
+async def handle_udemy_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
+    bot = UdemyBot(api_keys)
     
-    try:
-        # Attempt to send URLs
-        await context.bot.send_message(
-            chat_id=target_bot_id,
-            text=urls,
-            disable_notification=True,
-            disable_web_page_preview=True
-        )
-        print(f"Successfully sent to bot {target_bot_id}")
-    except Exception as e:
-        print(f"Failed to send: {str(e)}\nReinitializing chat...")
-        await initialize_bot_chat(context)  # Auto-recover chat session
+    url = update.message.text
+    course = bot.get_course_by_url(url)
+    
+    if not course:
+        await update.message.reply_text("⚠️ Could not find course details for this URL.")
+        return
+    
+    title = sanitize_html(course.get('title', 'Untitled Course'))
+    coupon = course.get('coupon', '#')
+    rating = course.get('rating', 'N/A')
+    duration = course.get('duration', 'N/A')
+    category = sanitize_html(course.get('category', 'Unknown'))
+    description = sanitize_html(course.get('desc_text', 'No description available'))
+    
+    # Truncate description if too long
+    if len(description) > 500:
+        description = description[:500] + "..."
+    
+    response = f"🎓 <b>{title}</b>\n\n"
+    response += f"🔗 <code>{coupon}</code>\n\n"
+    response += f"⭐ <b>Rating:</b> {rating}\n"
+    response += f"🕒 <b>Duration:</b> {duration}h\n"
+    response += f"🏷️ <b>Category:</b> {category}\n\n"
+    response += f"📝 <b>Description:</b>\n{description}"
+    
+    await update.message.reply_html(
+        response,
+        disable_web_page_preview=True
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -378,11 +319,45 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text("⚠️ An error occurred. Please try again later.")
 
+async def send_daily_courses_to_group(context: ContextTypes.DEFAULT_TYPE):
+    """Send top 20 courses as separate messages to a group"""
+    api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
+    bot = UdemyBot(api_keys)
+    courses = bot.get_top_courses()
+    
+    if not courses:
+        print("Failed to fetch courses for daily group update")
+        return
+    
+    # Get target group ID from environment variables
+    try:
+        group_id = int(os.environ['TARGET_GROUP_ID'])
+    except (KeyError, ValueError):
+        print("TARGET_GROUP_ID not set or invalid")
+        return
+    
+    # Send each course URL as a separate message
+    for course in courses:
+        url = course.get('coupon', '')
+        if not url.startswith('http'):
+            continue  # Skip invalid URLs
+            
+        try:
+            await context.bot.send_message(
+                chat_id=group_id,
+                text=url,
+                disable_web_page_preview=False,
+                disable_notification=True
+            )
+            print(f"Sent URL: {url}")
+        except Exception as e:
+            print(f"Failed to send URL: {str(e)}")
+    
+    print(f"Sent {len(courses)} course URLs to group {group_id}")
+
 def main():
     # Create Telegram Application
     application = Application.builder().token(os.environ['TELEGRAM_TOKEN']).build()
-
-    application.job_queue.run_once(initialize_bot_chat, when=0)
     
     # Add handlers
     application.add_handler(CommandHandler("start", start))
@@ -392,21 +367,24 @@ def main():
     application.add_handler(CommandHandler("search", search_courses))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_error_handler(error_handler)
-    application.add_handler(CommandHandler("testbot", test_bot_message))
-
-    # Daily 1AM IST (7:30PM UTC) delivery
-    application.job_queue.run_daily(
-        send_daily_courses,
-        time(hour=19, minute=30, tzinfo=timezone.utc),
-        days=tuple(range(7))
+    
+    # Add URL handler for group chats
+    url_pattern = r'https?://(?:www\.)?udemy\.com/course/[^/]+/?'
+    application.add_handler(MessageHandler(
+        filters.TEXT & filters.Regex(url_pattern) & filters.ChatType.GROUPS,
+        handle_udemy_url
+    ))
+    
+    # Set up daily job (1 PM IST = 7:30 AM UTC)
+    job_queue = application.job_queue
+    job_queue.run_daily(
+        send_daily_courses_to_group,
+        time(hour=7, minute=30, tzinfo=timezone.utc),  # 7:30 AM UTC = 1 PM IST
+        days=tuple(range(7))  # Every day of the week
     )
-
-    # Start bot
-    print("Bot is running with daily course delivery to target bot...")
-    application.run_polling()
     
     # Start bot
-    print("Bot is running...")
+    print("Bot is running with daily course delivery to group...")
     application.run_polling()
 
 if __name__ == "__main__":
