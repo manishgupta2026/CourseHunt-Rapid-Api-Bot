@@ -321,15 +321,18 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ An error occurred. Please try again later.")
 
 async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
-    """Check for new courses and send them to processing bot via Telegram"""
+    """Check for new courses and send them to a bridge channel"""
     api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
     bot = UdemyBot(api_keys)
     
-    # Get processing bot chat ID (the bot you want to send courses to)
-    processing_bot_chat_id = os.environ.get('PROCESSING_BOT_CHAT_ID')
-    if not processing_bot_chat_id:
-        print("❌ PROCESSING_BOT_CHAT_ID not set")
-        return
+    # Get bridge channel ID (where processing bot will read from)
+    bridge_channel_id = os.environ.get('BRIDGE_CHANNEL_ID')
+    if not bridge_channel_id:
+        print("❌ BRIDGE_CHANNEL_ID not set - using TARGET_GROUP_ID as fallback")
+        bridge_channel_id = os.environ.get('TARGET_GROUP_ID')
+        if not bridge_channel_id:
+            print("❌ No channel ID configured")
+            return
     
     # Get previously sent course IDs from bot_data
     if 'sent_course_ids' not in context.bot_data:
@@ -363,10 +366,10 @@ async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
             if course_id in sent_ids:
                 continue
             
-            # Send course URL to processing bot via Telegram
+            # Send course URL to bridge channel
             try:
                 await context.bot.send_message(
-                    chat_id=processing_bot_chat_id,
+                    chat_id=bridge_channel_id,
                     text=course_id,
                     disable_web_page_preview=True
                 )
