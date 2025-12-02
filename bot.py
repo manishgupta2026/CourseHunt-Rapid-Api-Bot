@@ -1,6 +1,7 @@
 import os
 import http.client
 import json
+import asyncio
 from html import escape
 from datetime import time, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -70,9 +71,9 @@ class UdemyBot:
     def search_courses(self, query, page=0):
         return self._make_request(f"{self.base_path}search?s={query}&page={page}") or []
     
-    def get_top_courses(self):
-        """Get top 20 courses without pagination"""
-        return self._make_request(f"{self.base_path}?page=0&limit=20") or []
+    def get_recent_courses(self, limit=10):
+        """Get recent courses (optimized for free API)"""
+        return self._make_request(f"{self.base_path}?page=0&limit={limit}") or []
 
 def sanitize_html(text):
     return escape(text).replace("&amp;", "&") if text else ""
@@ -319,41 +320,70 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text("⚠️ An error occurred. Please try again later.")
 
-async def send_daily_courses_to_group(context: ContextTypes.DEFAULT_TYPE):
-    """Send top 20 courses as separate messages to a group"""
+async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
+    """Check for new courses and send them to processing bot via Telegram"""
     api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
     bot = UdemyBot(api_keys)
-    courses = bot.get_top_courses()
     
-    if not courses:
-        print("Failed to fetch courses for daily group update")
+    # Get processing bot chat ID (the bot you want to send courses to)
+    processing_bot_chat_id = os.environ.get('PROCESSING_BOT_CHAT_ID')
+    if not processing_bot_chat_id:
+        print("❌ PROCESSING_BOT_CHAT_ID not set")
         return
     
-    # Get target group ID from environment variables
-    try:
-        group_id = int(os.environ['TARGET_GROUP_ID'])
-    except (KeyError, ValueError):
-        print("TARGET_GROUP_ID not set or invalid")
-        return
+    # Get previously sent course IDs from bot_data
+    if 'sent_course_ids' not in context.bot_data:
+        context.bot_data['sent_course_ids'] = set()
     
-    # Send each course URL as a separate message
-    for course in courses:
-        url = course.get('coupon', '')
-        if not url.startswith('http'):
-            continue  # Skip invalid URLs
+    sent_ids = context.bot_data['sent_course_ids']
+    new_count = 0
+    total_courses = 0
+    
+    # Check first 3 pages (30 courses total per check)
+    # Uses 3 API requests per hour = 72 requests/day (within 100 limit)
+    for page in range(3):
+        courses = bot.get_courses(page=page)
+        
+        if not courses:
+            print(f"⚠️ No courses fetched from page {page}")
+            continue
+        
+        total_courses += len(courses)
+        print(f"📚 Page {page}: Found {len(courses)} courses")
+        
+        # Send only NEW courses
+        for course in courses:
+            # Use coupon URL as unique identifier
+            course_id = course.get('coupon', '')
             
-        try:
-            await context.bot.send_message(
-                chat_id=group_id,
-                text=url,
-                disable_web_page_preview=False,
-                disable_notification=True
-            )
-            print(f"Sent URL: {url}")
-        except Exception as e:
-            print(f"Failed to send URL: {str(e)}")
+            if not course_id or not course_id.startswith('http'):
+                continue
+            
+            # Skip if already sent
+            if course_id in sent_ids:
+                continue
+            
+            # Send course URL to processing bot via Telegram
+            try:
+                await context.bot.send_message(
+                    chat_id=processing_bot_chat_id,
+                    text=course_id,
+                    disable_web_page_preview=True
+                )
+                sent_ids.add(course_id)
+                new_count += 1
+                print(f"✅ Sent NEW course: {course.get('title', 'Unknown')[:50]}")
+                
+                # Small delay to avoid rate limits
+                await asyncio.sleep(1)
+            except Exception as e:
+                print(f"❌ Failed to send: {str(e)}")
     
-    print(f"Sent {len(courses)} course URLs to group {group_id}")
+    # Keep only last 1000 IDs to prevent memory issues
+    if len(sent_ids) > 1000:
+        context.bot_data['sent_course_ids'] = set(list(sent_ids)[-1000:])
+    
+    print(f"📊 Summary: {total_courses} courses checked, {new_count} new courses sent, {total_courses - new_count} duplicates skipped")
 
 def main():
     # Create Telegram Application
@@ -375,16 +405,20 @@ def main():
         handle_udemy_url
     ))
     
-    # Set up daily job (1 PM IST = 7:30 AM UTC)
+    # Set up periodic job to check for new courses every 1 hour
+    # Checks 3 pages per hour = 30 courses per check
+    # Uses 72 requests/day (well within 100/day free limit)
     job_queue = application.job_queue
-    job_queue.run_daily(
-        send_daily_courses_to_group,
-        time(hour=7, minute=30, tzinfo=timezone.utc),  # 7:30 AM UTC = 1 PM IST
-        days=tuple(range(7))  # Every day of the week
+    job_queue.run_repeating(
+        check_and_send_new_courses,
+        interval=3600,  # 1 hour = 3600 seconds
+        first=10  # Start 10 seconds after bot starts
     )
     
     # Start bot
-    print("Bot is running with daily course delivery to group...")
+    print("🚀 Bot is running - checking for new courses every hour...")
+    print("📊 Checking 3 pages per hour = 30 courses per check")
+    print("📊 API Usage: 72 requests/day (within 100/day free limit)")
     application.run_polling()
 
 if __name__ == "__main__":
