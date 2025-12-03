@@ -377,8 +377,8 @@ async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
                 new_count += 1
                 print(f"✅ Sent NEW course: {course.get('title', 'Unknown')[:50]}")
                 
-                # Small delay to avoid rate limits
-                await asyncio.sleep(1)
+                # Delay to avoid Telegram flood control (max 20 msgs/min to channels)
+                await asyncio.sleep(3)
             except Exception as e:
                 print(f"❌ Failed to send: {str(e)}")
     
