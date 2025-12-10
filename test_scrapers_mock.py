@@ -212,12 +212,13 @@ def mock_requests_get(url, *args, **kwargs):
     elif "coursevania.com" in url and "admin-ajax" in url:
         mock_response.json.return_value = MOCK_COURSEVANIA_AJAX_RESPONSE
         
-    # CourseVania detail pages (check this before the main page with exact match)
-    elif "coursevania.com/courses/angular" in url or "coursevania.com/courses/docker" in url:
+    # CourseVania detail pages (any course slug, check before main page)
+    # Matches /courses/[slug] but not /courses/ alone
+    elif "coursevania.com/courses/" in url and url.split("/courses/")[1]:
         mock_response.content = MOCK_COURSEVANIA_DETAIL.encode()
         
-    # CourseVania main page (more general, should be last)
-    elif "coursevania.com/courses/" in url:
+    # CourseVania main page (matches /courses/ exactly)
+    elif url.endswith("coursevania.com/courses/"):
         mock_response.text = MOCK_COURSEVANIA_PAGE
         mock_response.content = MOCK_COURSEVANIA_PAGE.encode()
         
