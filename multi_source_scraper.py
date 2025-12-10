@@ -158,13 +158,16 @@ class MultiSourceCouponScraper:
             discount = data.get("discount", {})
             discount_percent = discount.get("discount_percent", 0)
             
-            # Check if discount price amount is 0
-            discount_price = discount.get("price", {})
-            discount_amount = discount_price.get("amount", None)
+            # Check if discount price amount is 0 (handle nested structure safely)
+            discount_amount = discount.get("price", {}).get("amount") if discount else None
             
-            # A course is free if either:
-            # 1. discount_percent is 100, OR
+            # Also check if price string indicates free
+            price = data.get("price", "")
+            
+            # A course is free if ANY of these conditions are true:
+            # 1. discount_percent is 100
             # 2. discount.price.amount is 0
+            # 3. price field starts with "Free"
             is_free = False
             reason = ""
             
@@ -174,14 +177,11 @@ class MultiSourceCouponScraper:
             elif discount_amount is not None and discount_amount == 0:
                 is_free = True
                 reason = f"discount amount is 0"
-            else:
-                reason = f"discount_percent={discount_percent}, discount_amount={discount_amount}"
-            
-            # Also check if price string indicates free
-            price = data.get("price", "")
-            if isinstance(price, str) and price.startswith("Free"):
+            elif isinstance(price, str) and price.startswith("Free"):
                 is_free = True
                 reason = "price field shows 'Free'"
+            else:
+                reason = f"discount_percent={discount_percent}, discount_amount={discount_amount}, price={price}"
             
             if is_free:
                 logger.debug(f"✅ Course {slug} is FREE: {reason}")
