@@ -19,8 +19,9 @@ A powerful **Python Telegram bot** that automatically finds and shares **100% fr
 
 ### ✅ 100% Off Coupon Validation
 - **Udemy API Validation**: Every coupon is verified via Udemy's API
-- **Only Free Courses**: Only courses with `discount_percent == 100` are sent
+- **Only Free Courses**: Validates using multiple criteria (discount_percent == 100 OR discount.price.amount == 0)
 - **No Expired Coupons**: Validates before sending to ensure coupons work
+- **Debug Logging**: Comprehensive logging for troubleshooting validation decisions
 
 ### 📡 Automatic Channel Updates
 - **Scheduled Fetching**: Automatically checks for new courses every 2 hours
@@ -193,7 +194,8 @@ CourseHunt-Rapid-Api-Bot/
 │                    │                                        │
 │                    ▼                                        │
 │  2. VALIDATE 100% OFF                                       │
-│     └── Udemy API: Check discount_percent == 100            │
+│     └── Udemy API: Check discount_percent == 100 OR         │
+│         discount.price.amount == 0                          │
 │                    │                                        │
 │                    ▼                                        │
 │  3. DEDUPLICATE                                             │
