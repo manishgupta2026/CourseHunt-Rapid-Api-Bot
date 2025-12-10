@@ -684,7 +684,7 @@ async def pause_fetching_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     context.bot_data['fetching_paused'] = True
-    await update.message.reply_text("⏸️ **Course fetching paused**\n\n• Automatic scraping is now disabled\n• Bot will skip all scheduled fetch cycles\n• Use `/resume` to re-enable fetching\n• `/forcerun` will still work for manual fetches", parse_mode='Markdown')
+    await update.message.reply_text("⏸️ <b>Course fetching paused</b>\n\n• Automatic scraping is now disabled\n• Bot will skip all scheduled fetch cycles\n• Use <code>/resume</code> to re-enable fetching\n• <code>/forcerun</code> will still work for manual fetches", parse_mode='HTML')
 
 async def resume_fetching_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Resume automatic course fetching (admin only)"""
@@ -693,7 +693,7 @@ async def resume_fetching_command(update: Update, context: ContextTypes.DEFAULT_
         return
     
     context.bot_data['fetching_paused'] = False
-    await update.message.reply_text("▶️ **Course fetching resumed**\n\n• Automatic scraping is now enabled\n• Bot will resume normal 2-hour cycles\n• Next fetch will happen as scheduled", parse_mode='Markdown')
+    await update.message.reply_text("▶️ <b>Course fetching resumed</b>\n\n• Automatic scraping is now enabled\n• Bot will resume normal 2-hour cycles\n• Next fetch will happen as scheduled", parse_mode='HTML')
 
 async def help_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin help (admin only)"""
@@ -701,7 +701,7 @@ async def help_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("❌ Admin access required.")
         return
     
-    help_text = """🔧 **Admin Commands**
+    help_text = """🔧 <b>Admin Commands</b>
 
 📊 `/stats` - Detailed bot statistics
 🔄 `/restart` - Restart the bot process
@@ -710,21 +710,24 @@ async def help_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 � ``/forcerun` - Manual course fetch cycle
 📱 `/status` - Quick bot status
 🗑️ `/clearcache` - Clear course cache
+⏸️ `/pause` - Pause automatic fetching
+▶️ `/resume` - Resume automatic fetching
 ❓ `/adminhelp` - This help message
 
-🤖 **Bot Info**:
+🤖 <b>Bot Info</b>:
 • Runs every 2 hours automatically
 • Fetches from 5 sources (RapidAPI + 4 scrapers)
 • Sends courses to bridge channel
 • Maintains cache to avoid duplicates
 
-⚠️ **Notes**:
+⚠️ <b>Notes</b>:
 • Only admin can use these commands
 • Restart will reset temporary stats
 • Clear cache will resend all courses
+• Pause/Resume controls automatic fetching only
 • Stop command requires manual restart"""
     
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    await update.message.reply_text(help_text, parse_mode='HTML')
 
 def main():
     # Create Telegram Application
