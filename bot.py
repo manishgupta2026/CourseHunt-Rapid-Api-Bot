@@ -1,9 +1,16 @@
+"""
+Telegram Bot for Udemy Free Courses
+Fetches courses from multiple sources, validates 100% off coupons, and sends to bridge channel
+"""
+
 import os
 import http.client
 import json
 import asyncio
+import logging
 from html import escape
-from datetime import time, timezone
+from datetime import datetime, timedelta, time, timezone
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -16,11 +23,19 @@ from telegram.ext import (
 
 # Import our multi-source scraper
 from multi_source_scraper import MultiSourceCouponScraper
-from datetime import datetime, timedelta
 import psutil
-import sys
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 class UdemyBot:
+    """RapidAPI client for fetching Udemy courses"""
+    
     def __init__(self, api_keys):
         self.api_keys = api_keys
         self.current_key_index = 0
@@ -36,7 +51,7 @@ class UdemyBot:
     
     def _rotate_key(self):
         self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-        print(f"Rotated to API key #{self.current_key_index + 1}")
+        logger.info(f"Rotated to API key #{self.current_key_index + 1}")
 
     def _make_request(self, endpoint):
         for attempt in range(len(self.api_keys)):
@@ -48,12 +63,12 @@ class UdemyBot:
                 if res.status == 200:
                     return json.loads(res.read().decode('utf-8'))
                 elif res.status == 429:  # Rate limit exceeded
-                    print(f"Rate limit hit on key #{self.current_key_index + 1}")
+                    logger.warning(f"Rate limit hit on key #{self.current_key_index + 1}")
                     self._rotate_key()
                 else:
-                    print(f"API error {res.status}: {res.reason}")
+                    logger.error(f"API error {res.status}: {res.reason}")
             except Exception as e:
-                print(f"Connection error: {str(e)}")
+                logger.error(f"Connection error: {str(e)}")
             finally:
                 conn.close()
         return None
@@ -81,10 +96,14 @@ class UdemyBot:
         """Get recent courses (optimized for free API)"""
         return self._make_request(f"{self.base_path}?page=0&limit={limit}") or []
 
+
 def sanitize_html(text):
+    """Sanitize text for HTML output"""
     return escape(text).replace("&amp;", "&") if text else ""
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start and /help commands"""
     help_text = """
 🎓 <b>Udemy Courses Bot</b> 🚀
 
@@ -96,13 +115,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     await update.message.reply_html(help_text)
 
+
 async def count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /count command"""
     api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
     bot = UdemyBot(api_keys)
     total = bot.get_total_courses()
     await update.message.reply_text(f"📚 Total courses available: {total}")
 
+
 async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /list command with pagination"""
     api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
     bot = UdemyBot(api_keys)
     
@@ -145,7 +168,7 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True
         )
     except Exception as e:
-        print(f"Failed to send message: {str(e)}")
+        logger.error(f"Failed to send message: {str(e)}")
         plain_response = f"Page {page+1}/{total_pages}\n\n"
         for i, course in enumerate(courses, 1):
             plain_response += f"{i}. {course.get('title', 'Untitled Course')}\n"
@@ -154,7 +177,9 @@ async def list_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plain_response += f"Category: {course.get('category', 'Unknown')}\n\n"
         await update.message.reply_text(plain_response)
 
+
 async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /search command"""
     api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
     bot = UdemyBot(api_keys)
     
@@ -197,7 +222,7 @@ async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True
         )
     except Exception as e:
-        print(f"Failed to send message: {str(e)}")
+        logger.error(f"Failed to send message: {str(e)}")
         plain_response = f"Results for '{query}' (Page {page+1})\n\n"
         for i, course in enumerate(courses, 1):
             plain_response += f"{i}. {course.get('title', 'Untitled Course')}\n"
@@ -205,7 +230,9 @@ async def search_courses(update: Update, context: ContextTypes.DEFAULT_TYPE):
             plain_response += f"Rating: {course.get('rating', 'N/A')} | Duration: {course.get('duration', 'N/A')}h\n\n"
         await update.message.reply_text(plain_response)
 
+
 async def handle_udemy_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Udemy URLs posted in group chats"""
     api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
     bot = UdemyBot(api_keys)
     
@@ -239,7 +266,9 @@ async def handle_udemy_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         disable_web_page_preview=True
     )
 
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses"""
     query = update.callback_query
     await query.answer()
     
@@ -318,31 +347,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
     except Exception as e:
-        print(f"Error handling callback: {str(e)}")
+        logger.error(f"Error handling callback: {str(e)}")
         await query.edit_message_text("⚠️ Error loading content. Please try again.")
 
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"Update {update} caused error {context.error}")
-    if update.message:
+    """Handle errors"""
+    logger.error(f"Update {update} caused error {context.error}")
+    if update and update.message:
         await update.message.reply_text("⚠️ An error occurred. Please try again later.")
 
+
 async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
-    """Check for new courses from multiple sources and send them to bridge channel"""
+    """
+    Check for new courses from multiple sources and send them to bridge channel.
+    Only sends courses with validated 100% off coupons.
+    """
     # Check if fetching is paused
     if context.bot_data.get('fetching_paused', False):
-        print("⏸️ Course fetching is paused - skipping this cycle")
+        logger.info("⏸️ Course fetching is paused - skipping this cycle")
         return
     
-    # Get bridge channel ID (where processing bot will read from)
+    # Get bridge channel ID
     bridge_channel_id = os.environ.get('BRIDGE_CHANNEL_ID')
     if not bridge_channel_id:
-        print("❌ BRIDGE_CHANNEL_ID not set - using TARGET_GROUP_ID as fallback")
+        logger.warning("❌ BRIDGE_CHANNEL_ID not set - using TARGET_GROUP_ID as fallback")
         bridge_channel_id = os.environ.get('TARGET_GROUP_ID')
         if not bridge_channel_id:
-            print("❌ No channel ID configured")
+            logger.error("❌ No channel ID configured")
             return
     
-    # Get previously sent course IDs from bot_data
+    # Initialize sent course IDs cache
     if 'sent_course_ids' not in context.bot_data:
         context.bot_data['sent_course_ids'] = set()
     
@@ -350,16 +385,16 @@ async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
     new_count = 0
     total_courses = 0
     
-    print("🚀 Starting multi-source course fetching...")
+    logger.info("🚀 Starting multi-source course fetching...")
     
-    # 1. Fetch from RapidAPI (existing functionality)
+    # 1. Fetch from RapidAPI
     rapidapi_courses = []
     api_keys_env = os.environ.get('RAPIDAPI_KEYS')
     if api_keys_env:
         api_keys = api_keys_env.split(',')
         bot = UdemyBot(api_keys)
         
-        print("📡 Fetching from RapidAPI...")
+        logger.info("📡 Fetching from RapidAPI...")
         for page in range(3):
             courses = bot.get_courses(page=page)
             if courses:
@@ -368,53 +403,55 @@ async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
                     if course_url and course_url.startswith('http'):
                         rapidapi_courses.append({
                             'title': course.get('title', 'Unknown Course'),
-                            'url': course_url,
-                            'source': 'RapidAPI'
+                            'url': course_url
                         })
-        print(f"📡 RapidAPI: Found {len(rapidapi_courses)} courses")
+        logger.info(f"📡 RapidAPI: Found {len(rapidapi_courses)} courses")
     
-    # 2. Fetch from multiple coupon sites
-    multi_scraper = MultiSourceCouponScraper()
+    # 2. Fetch from multiple coupon sites with validation enabled
+    multi_scraper = MultiSourceCouponScraper(validate_coupons=True)
     scraped_courses = []
     
     try:
         scraped_courses = await multi_scraper.scrape_all_sources()
-        print(f"🌐 Multi-source scrapers: Found {len(scraped_courses)} courses")
+        logger.info(f"🌐 Multi-source scrapers: Found {len(scraped_courses)} validated courses")
     except Exception as e:
-        print(f"❌ Multi-source scraping failed: {str(e)}")
+        logger.error(f"❌ Multi-source scraping failed: {str(e)}")
     
     # 3. Combine all sources
     all_courses = rapidapi_courses + scraped_courses
     total_courses = len(all_courses)
     
     # 4. Remove duplicates and send new courses
+    seen_urls = set()
     for course in all_courses:
         course_url = course['url']
         
-        # Skip if already sent
+        # Skip duplicates within this batch
+        if course_url in seen_urls:
+            continue
+        seen_urls.add(course_url)
+        
+        # Skip if already sent previously
         if course_url in sent_ids:
             continue
         
         # Send course URL to bridge channel
         try:
-            # Add source info to message
-            message_text = f"{course_url}\n📍 Source: {course['source']}"
-            
             await context.bot.send_message(
                 chat_id=bridge_channel_id,
-                text=message_text,
+                text=course_url,
                 disable_web_page_preview=True
             )
             sent_ids.add(course_url)
             new_count += 1
-            print(f"✅ Sent NEW course from {course['source']}: {course['title'][:50]}")
+            logger.info(f"✅ Sent NEW course: {course['title'][:50]}...")
             
-            # Delay to avoid Telegram flood control (max 20 msgs/min to channels)
+            # Delay to avoid Telegram flood control
             await asyncio.sleep(3)
         except Exception as e:
-            print(f"❌ Failed to send: {str(e)}")
+            logger.error(f"❌ Failed to send: {str(e)}")
     
-    # Keep only last 2000 IDs to prevent memory issues (increased for multiple sources)
+    # Keep only last 2000 IDs to prevent memory issues
     if len(sent_ids) > 2000:
         context.bot_data['sent_course_ids'] = set(list(sent_ids)[-2000:])
     
@@ -427,8 +464,7 @@ async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
             'total_courses_sent': 0,
             'rapidapi_courses': 0,
             'scraped_courses': 0,
-            'last_run': None,
-            'sources_stats': {}
+            'last_run': None
         }
     
     stats = context.bot_data['bot_stats']
@@ -439,28 +475,22 @@ async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
     stats['scraped_courses'] += len(scraped_courses)
     stats['last_run'] = datetime.now()
     
-    # Update source statistics
-    for course in all_courses:
-        source = course['source']
-        if source not in stats['sources_stats']:
-            stats['sources_stats'][source] = {'found': 0, 'sent': 0}
-        stats['sources_stats'][source]['found'] += 1
-        if course['url'] not in sent_ids or course['url'] in [c['url'] for c in all_courses[:new_count]]:
-            stats['sources_stats'][source]['sent'] += 1
-    
-    print(f"📊 MULTI-SOURCE Summary:")
-    print(f"   📚 Total courses found: {total_courses}")
-    print(f"   ✅ New courses sent: {new_count}")
-    print(f"   🔄 Duplicates skipped: {total_courses - new_count}")
-    print(f"   📡 RapidAPI: {len(rapidapi_courses)} courses")
-    print(f"   🌐 Other sources: {len(scraped_courses)} courses")
+    logger.info(f"📊 MULTI-SOURCE Summary:")
+    logger.info(f"   📚 Total courses found: {total_courses}")
+    logger.info(f"   ✅ New courses sent: {new_count}")
+    logger.info(f"   🔄 Duplicates skipped: {total_courses - new_count}")
+    logger.info(f"   📡 RapidAPI: {len(rapidapi_courses)} courses")
+    logger.info(f"   🌐 Scraped (validated): {len(scraped_courses)} courses")
 
-# Admin user ID (replace with your Telegram user ID)
+
+# Admin user ID
 ADMIN_USER_ID = int(os.environ.get('ADMIN_USER_ID', '900041837'))
+
 
 def is_admin(user_id):
     """Check if user is admin"""
     return user_id == ADMIN_USER_ID
+
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show bot statistics (admin only)"""
@@ -477,7 +507,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now() - start_time
     
     # Calculate rates
-    hours_running = max(uptime.total_seconds() / 3600, 0.1)  # Avoid division by zero
+    hours_running = max(uptime.total_seconds() / 3600, 0.1)
     courses_per_hour = stats['total_courses_sent'] / hours_running
     
     stats_text = f"""📊 **Multi-Source Bot Statistics**
@@ -494,11 +524,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
    • {stats['total_courses_sent']/max(stats['total_runs'],1):.1f} courses/run
    • Last run: {stats.get('last_run', 'Never').strftime('%H:%M:%S') if stats.get('last_run') else 'Never'}
 
-📡 **Sources**:"""
-    
-    # Add source statistics
-    for source, source_stats in stats.get('sources_stats', {}).items():
-        stats_text += f"\n   • {source}: {source_stats['sent']}/{source_stats['found']} sent"
+📡 **Sources**:
+   • RapidAPI: {stats['rapidapi_courses']} courses
+   • Scraped (validated): {stats['scraped_courses']} courses"""
     
     # System stats
     try:
@@ -510,6 +538,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(stats_text, parse_mode='Markdown')
 
+
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Restart the bot (admin only)"""
     if not is_admin(update.effective_user.id):
@@ -518,12 +547,11 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("🔄 Restarting bot... This may take a moment.")
     
-    # Save current stats before restart
     if 'bot_stats' in context.bot_data:
-        print("💾 Saving stats before restart...")
+        logger.info("💾 Saving stats before restart...")
     
-    # Exit the process - Heroku will automatically restart it
     os._exit(0)
+
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stop the bot completely (admin only)"""
@@ -533,19 +561,17 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text("🛑 Stopping bot... Bot will be offline until manually restarted.")
     
-    # Save current stats before stopping
     if 'bot_stats' in context.bot_data:
         stats = context.bot_data['bot_stats']
-        print(f"💾 Final stats - Runs: {stats['total_runs']}, Courses sent: {stats['total_courses_sent']}")
+        logger.info(f"💾 Final stats - Runs: {stats['total_runs']}, Courses sent: {stats['total_courses_sent']}")
     
-    print("🛑 Bot stopped by admin command")
+    logger.info("🛑 Bot stopped by admin command")
     
-    # Stop the application gracefully
     await context.application.stop()
     await context.application.shutdown()
     
-    # Force exit
     os._exit(1)
+
 
 async def restart_heroku_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Restart Heroku dyno (admin only)"""
@@ -553,7 +579,6 @@ async def restart_heroku_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Admin access required.")
         return
     
-    # Check if running on Heroku
     if 'DYNO' not in os.environ:
         await update.message.reply_text("❌ Not running on Heroku. Use /restart instead.")
         return
@@ -561,7 +586,6 @@ async def restart_heroku_command(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text("🔄 Restarting Heroku dyno... This will take 10-30 seconds.")
     
     try:
-        # Try to restart using Heroku API if token is available
         heroku_token = os.environ.get('HEROKU_API_TOKEN')
         app_name = os.environ.get('HEROKU_APP_NAME', 'rapid-api-bot')
         
@@ -572,33 +596,30 @@ async def restart_heroku_command(update: Update, context: ContextTypes.DEFAULT_T
                 'Accept': 'application/vnd.heroku+json; version=3'
             }
             
-            # Restart all dynos
             response = requests.delete(
                 f'https://api.heroku.com/apps/{app_name}/dynos',
                 headers=headers
             )
             
             if response.status_code == 202:
-                print("✅ Heroku dyno restart initiated via API")
+                logger.info("✅ Heroku dyno restart initiated via API")
             else:
-                print(f"⚠️ Heroku API restart failed: {response.status_code}")
+                logger.warning(f"⚠️ Heroku API restart failed: {response.status_code}")
                 raise Exception("API restart failed")
         else:
             raise Exception("No Heroku API token")
             
     except Exception as e:
-        print(f"⚠️ Heroku API restart failed: {e}")
-        print("🔄 Falling back to process restart...")
+        logger.warning(f"⚠️ Heroku API restart failed: {e}")
+        logger.info("🔄 Falling back to process restart...")
         
-        # Fallback to process restart
         await update.message.reply_text("🔄 API restart failed, using process restart...")
         
-        # Save stats
         if 'bot_stats' in context.bot_data:
-            print("💾 Saving stats before restart...")
+            logger.info("💾 Saving stats before restart...")
         
-        # Exit process - Heroku will restart
         os._exit(0)
+
 
 async def force_run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Force run the course fetching cycle (admin only)"""
@@ -614,13 +635,13 @@ async def force_run_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error during manual fetch: {str(e)}")
 
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show bot status (admin only)"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Admin access required.")
         return
     
-    # Check if bot_data exists
     if 'bot_stats' not in context.bot_data:
         is_paused = context.bot_data.get('fetching_paused', False)
         pause_status = "⏸️ PAUSED" if is_paused else "▶️ Active"
@@ -631,7 +652,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if last_run:
             time_since_last = datetime.now() - last_run
-            next_run_in = timedelta(seconds=7200) - time_since_last  # 2 hours cycle
+            next_run_in = timedelta(seconds=7200) - time_since_last
             
             if next_run_in.total_seconds() > 0:
                 next_run_str = f"{int(next_run_in.total_seconds()//3600)}h {int((next_run_in.total_seconds()//60)%60)}m"
@@ -640,7 +661,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             next_run_str = "Unknown"
         
-        # Check if fetching is paused
         is_paused = context.bot_data.get('fetching_paused', False)
         pause_status = "⏸️ PAUSED" if is_paused else "▶️ Active"
         
@@ -648,14 +668,14 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ⏰ **Schedule**: Every 2 hours
 🔄 **Fetching**: {pause_status}
-� **Neuxt Run**: {next_run_str if not is_paused else 'Paused'}
+⏭️ **Next Run**: {next_run_str if not is_paused else 'Paused'}
 📊 **Total Runs**: {stats['total_runs']}
 ✅ **Last Success**: {last_run.strftime('%H:%M:%S') if last_run else 'Never'}
 
-🌐 **Sources Active**: {len(stats.get('sources_stats', {}))}
-📚 **Courses Sent**: {stats['total_courses_sent']}"""
+📡 **RapidAPI Courses**: {stats['rapidapi_courses']}
+🌐 **Scraped Courses**: {stats['scraped_courses']}
+📚 **Total Sent**: {stats['total_courses_sent']}"""
     
-    # Check memory usage
     try:
         sent_ids_count = len(context.bot_data.get('sent_course_ids', set()))
         status_text += f"\n💾 **Cache**: {sent_ids_count} course IDs stored"
@@ -663,6 +683,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     
     await update.message.reply_text(status_text, parse_mode='Markdown')
+
 
 async def clear_cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear the course cache (admin only)"""
@@ -677,6 +698,7 @@ async def clear_cache_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text("📭 Cache is already empty.")
 
+
 async def pause_fetching_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Pause automatic course fetching (admin only)"""
     if not is_admin(update.effective_user.id):
@@ -684,7 +706,15 @@ async def pause_fetching_command(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     context.bot_data['fetching_paused'] = True
-    await update.message.reply_text("⏸️ <b>Course fetching paused</b>\n\n• Automatic scraping is now disabled\n• Bot will skip all scheduled fetch cycles\n• Use <code>/resume</code> to re-enable fetching\n• <code>/forcerun</code> will still work for manual fetches", parse_mode='HTML')
+    await update.message.reply_text(
+        "⏸️ <b>Course fetching paused</b>\n\n"
+        "• Automatic scraping is now disabled\n"
+        "• Bot will skip all scheduled fetch cycles\n"
+        "• Use <code>/resume</code> to re-enable fetching\n"
+        "• <code>/forcerun</code> will still work for manual fetches",
+        parse_mode='HTML'
+    )
+
 
 async def resume_fetching_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Resume automatic course fetching (admin only)"""
@@ -693,7 +723,14 @@ async def resume_fetching_command(update: Update, context: ContextTypes.DEFAULT_
         return
     
     context.bot_data['fetching_paused'] = False
-    await update.message.reply_text("▶️ <b>Course fetching resumed</b>\n\n• Automatic scraping is now enabled\n• Bot will resume normal 2-hour cycles\n• Next fetch will happen as scheduled", parse_mode='HTML')
+    await update.message.reply_text(
+        "▶️ <b>Course fetching resumed</b>\n\n"
+        "• Automatic scraping is now enabled\n"
+        "• Bot will resume normal 2-hour cycles\n"
+        "• Next fetch will happen as scheduled",
+        parse_mode='HTML'
+    )
+
 
 async def help_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin help (admin only)"""
@@ -703,21 +740,22 @@ async def help_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     help_text = """🔧 <b>Admin Commands</b>
 
-📊 `/stats` - Detailed bot statistics
-🔄 `/restart` - Restart the bot process
-� `//stop` - Stop the bot completely
-⚡ `/restart_heroku` - Restart Heroku dyno
-� ``/forcerun` - Manual course fetch cycle
-📱 `/status` - Quick bot status
-🗑️ `/clearcache` - Clear course cache
-⏸️ `/pause` - Pause automatic fetching
-▶️ `/resume` - Resume automatic fetching
-❓ `/adminhelp` - This help message
+📊 <code>/stats</code> - Detailed bot statistics
+🔄 <code>/restart</code> - Restart the bot process
+🛑 <code>/stop</code> - Stop the bot completely
+⚡ <code>/restart_heroku</code> - Restart Heroku dyno
+🚀 <code>/forcerun</code> - Manual course fetch cycle
+📱 <code>/status</code> - Quick bot status
+🗑️ <code>/clearcache</code> - Clear course cache
+⏸️ <code>/pause</code> - Pause automatic fetching
+▶️ <code>/resume</code> - Resume automatic fetching
+❓ <code>/adminhelp</code> - This help message
 
 🤖 <b>Bot Info</b>:
 • Runs every 2 hours automatically
 • Fetches from 5 sources (RapidAPI + 4 scrapers)
-• Sends courses to bridge channel
+• Validates 100% off coupons via Udemy API
+• Sends only validated free courses to bridge channel
 • Maintains cache to avoid duplicates
 
 ⚠️ <b>Notes</b>:
@@ -729,11 +767,13 @@ async def help_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await update.message.reply_text(help_text, parse_mode='HTML')
 
+
 def main():
+    """Main function to run the bot"""
     # Create Telegram Application
     application = Application.builder().token(os.environ['TELEGRAM_TOKEN']).build()
     
-    # Add handlers
+    # User command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
     application.add_handler(CommandHandler("count", count))
@@ -742,7 +782,7 @@ def main():
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_error_handler(error_handler)
     
-    # Admin commands
+    # Admin command handlers
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("stop", stop_command))
@@ -754,7 +794,7 @@ def main():
     application.add_handler(CommandHandler("resume", resume_fetching_command))
     application.add_handler(CommandHandler("adminhelp", help_admin_command))
     
-    # Add URL handler for group chats
+    # URL handler for group chats
     url_pattern = r'https?://(?:www\.)?udemy\.com/course/[^/]+/?'
     application.add_handler(MessageHandler(
         filters.TEXT & filters.Regex(url_pattern) & filters.ChatType.GROUPS,
@@ -762,28 +802,27 @@ def main():
     ))
     
     # Set up periodic job to check for new courses every 2 hours
-    # Multi-source fetching: RapidAPI + web scrapers
-    # RapidAPI: 3 pages per check = 36 requests/day (within 100/day limit)
-    # Web scrapers: No API limits, respectful scraping with delays
     job_queue = application.job_queue
     job_queue.run_repeating(
         check_and_send_new_courses,
-        interval=7200,  # 2 hours = 7200 seconds (12 checks per day)
+        interval=7200,  # 2 hours
         first=10  # Start 10 seconds after bot starts
     )
     
     # Start bot
-    print("🚀 Multi-Source Udemy Bot is running!")
-    print("📊 Checking multiple sources every 2 hours:")
-    print("   📡 RapidAPI: 3 pages per check")
-    print("   🌐 Real.discount: Free courses")
-    print("   🌐 Discudemy: Discounted courses") 
-    print("   🌐 CourseVania: Course deals")
-    print("   🌐 UdemyFreebies: Free courses")
-    print("📊 API Usage: 36 RapidAPI requests/day (within 100/day limit)")
-    print("📊 Expected: 50-200+ courses per check from all sources")
-    print(f"🔧 Admin ID: {ADMIN_USER_ID} (use /adminhelp for commands)")
+    logger.info("🚀 Multi-Source Udemy Bot is running!")
+    logger.info("📊 Checking multiple sources every 2 hours:")
+    logger.info("   📡 RapidAPI: 3 pages per check")
+    logger.info("   🌐 Real.discount: Free courses")
+    logger.info("   🌐 Discudemy: Discounted courses")
+    logger.info("   🌐 CourseVania: Course deals")
+    logger.info("   🌐 UdemyFreebies: Free courses")
+    logger.info("   ✅ Coupon validation: 100% off only")
+    logger.info("📊 API Usage: 36 RapidAPI requests/day (within 100/day limit)")
+    logger.info("📊 Expected: 50-200+ validated courses per check from all sources")
+    logger.info(f"🔧 Admin ID: {ADMIN_USER_ID} (use /adminhelp for commands)")
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
