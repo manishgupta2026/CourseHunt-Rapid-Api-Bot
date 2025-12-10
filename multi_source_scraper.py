@@ -99,16 +99,20 @@ class MultiSourceCouponScraper:
         """
         clean_url = self.cleanup_link(url)
         if not clean_url:
+            logger.debug(f"❌ Invalid URL format: {url}")
             return False
         
         # Check cache first to avoid redundant API calls
         if clean_url in self._validation_cache:
-            return self._validation_cache[clean_url]
+            cached_result = self._validation_cache[clean_url]
+            logger.debug(f"📦 Cache hit for {clean_url}: {cached_result}")
+            return cached_result
         
         try:
             parsed = urlparse(clean_url)
             path_parts = parsed.path.split("/course/")
             if len(path_parts) < 2:
+                logger.debug(f"❌ Invalid course path: {clean_url}")
                 return False
                 
             slug = path_parts[-1].strip("/")
@@ -125,14 +129,16 @@ class MultiSourceCouponScraper:
                     break
             
             if not coupon_code:
+                logger.debug(f"❌ No coupon code found in URL: {clean_url}")
                 self._validation_cache[clean_url] = False
                 return False
             
-            # Query Udemy API with coupon code
+            # Query Udemy API with correct fields for coupon validation
             api_url = (
                 f"https://www.udemy.com/api-2.0/courses/{slug}/"
-                f"?fields[course]=price,discount&couponCode={coupon_code}"
+                f"?fields[course]=is_paid,price,discounted_price,discount,has_discount&couponCode={coupon_code}"
             )
+            logger.debug(f"🔍 Checking Udemy API: {api_url}")
             
             response = self.session.get(
                 api_url,
@@ -141,25 +147,52 @@ class MultiSourceCouponScraper:
             )
             
             if response.status_code != 200:
+                logger.debug(f"❌ API error {response.status_code} for {slug} with coupon {coupon_code}")
                 self._validation_cache[clean_url] = False
                 return False
                 
             data = response.json()
+            logger.debug(f"📥 API Response for {slug}: {data}")
             
-            # Check for 100% discount
+            # Check for 100% discount using multiple validation criteria
             discount = data.get("discount", {})
-            is_free = discount.get("discount_percent") == 100
+            discount_percent = discount.get("discount_percent", 0)
             
-            # Also check if price is 0
+            # Check if discount price amount is 0
+            discount_price = discount.get("price", {})
+            discount_amount = discount_price.get("amount", None)
+            
+            # A course is free if either:
+            # 1. discount_percent is 100, OR
+            # 2. discount.price.amount is 0
+            is_free = False
+            reason = ""
+            
+            if discount_percent == 100:
+                is_free = True
+                reason = f"discount_percent is 100%"
+            elif discount_amount is not None and discount_amount == 0:
+                is_free = True
+                reason = f"discount amount is 0"
+            else:
+                reason = f"discount_percent={discount_percent}, discount_amount={discount_amount}"
+            
+            # Also check if price string indicates free
             price = data.get("price", "")
             if isinstance(price, str) and price.startswith("Free"):
                 is_free = True
+                reason = "price field shows 'Free'"
+            
+            if is_free:
+                logger.debug(f"✅ Course {slug} is FREE: {reason}")
+            else:
+                logger.debug(f"❌ Course {slug} is NOT free: {reason}")
             
             self._validation_cache[clean_url] = is_free
             return is_free
             
         except Exception as e:
-            logger.debug(f"Coupon validation error for {url}: {e}")
+            logger.debug(f"❌ Coupon validation error for {url}: {e}")
             self._validation_cache[clean_url] = False
             return False
 
