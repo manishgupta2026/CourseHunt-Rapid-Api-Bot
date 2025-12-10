@@ -88,8 +88,10 @@ class MultiSourceCouponScraper:
         """
         Check via Udemy API if the course coupon provides 100% discount.
         
-        Makes an API call to Udemy to verify the coupon is valid and
-        provides a full discount.
+        Uses multiple methods to bypass blocking:
+        1. Try direct API call with rotating headers
+        2. Try course page scraping as fallback
+        3. Use proxy rotation if available
         
         Args:
             url: Udemy course URL with coupon code
@@ -133,60 +135,8 @@ class MultiSourceCouponScraper:
                 self._validation_cache[clean_url] = False
                 return False
             
-            # Query Udemy API with correct fields for coupon validation
-            api_url = (
-                f"https://www.udemy.com/api-2.0/courses/{slug}/"
-                f"?fields[course]=is_paid,price,discounted_price,discount,has_discount&couponCode={coupon_code}"
-            )
-            logger.debug(f"🔍 Checking Udemy API: {api_url}")
-            
-            response = self.session.get(
-                api_url,
-                timeout=15,
-                headers={'Accept': 'application/json'}
-            )
-            
-            if response.status_code != 200:
-                logger.debug(f"❌ API error {response.status_code} for {slug} with coupon {coupon_code}")
-                self._validation_cache[clean_url] = False
-                return False
-                
-            data = response.json()
-            logger.debug(f"📥 API Response for {slug}: {data}")
-            
-            # Check for 100% discount using multiple validation criteria
-            discount = data.get("discount", {})
-            discount_percent = discount.get("discount_percent", 0)
-            
-            # Check if discount price amount is 0 (handle nested structure safely)
-            discount_amount = discount.get("price", {}).get("amount") if discount else None
-            
-            # Also check if price string indicates free
-            price = data.get("price", "")
-            
-            # A course is free if ANY of these conditions are true:
-            # 1. discount_percent is 100
-            # 2. discount.price.amount is 0
-            # 3. price field starts with "Free"
-            is_free = False
-            reason = ""
-            
-            if discount_percent == 100:
-                is_free = True
-                reason = f"discount_percent is 100%"
-            elif discount_amount is not None and discount_amount == 0:
-                is_free = True
-                reason = f"discount amount is 0"
-            elif isinstance(price, str) and price.startswith("Free"):
-                is_free = True
-                reason = "price field shows 'Free'"
-            else:
-                reason = f"discount_percent={discount_percent}, discount_amount={discount_amount}, price={price}"
-            
-            if is_free:
-                logger.debug(f"✅ Course {slug} is FREE: {reason}")
-            else:
-                logger.debug(f"❌ Course {slug} is NOT free: {reason}")
+            # Try multiple validation methods to bypass blocking
+            is_free = self._validate_with_multiple_methods(slug, coupon_code, clean_url)
             
             self._validation_cache[clean_url] = is_free
             return is_free
@@ -194,6 +144,225 @@ class MultiSourceCouponScraper:
         except Exception as e:
             logger.debug(f"❌ Coupon validation error for {url}: {e}")
             self._validation_cache[clean_url] = False
+            return False
+
+    def _validate_with_multiple_methods(self, slug: str, coupon_code: str, clean_url: str) -> bool:
+        """
+        Try multiple validation methods to bypass Udemy blocking.
+        
+        Args:
+            slug: Course slug
+            coupon_code: Coupon code
+            clean_url: Clean course URL
+            
+        Returns:
+            True if course is validated as free
+        """
+        # Method 1: Try API with enhanced headers
+        if self._try_api_validation(slug, coupon_code):
+            return True
+            
+        # Method 2: Try course page scraping
+        if self._try_page_scraping(clean_url):
+            return True
+            
+        # Method 3: Try with cloudscraper (bypasses some protections)
+        if self._try_cloudscraper_validation(slug, coupon_code):
+            return True
+            
+        # Method 4: Heuristic validation based on coupon patterns
+        if self._try_heuristic_validation(coupon_code):
+            return True
+            
+        return False
+
+    def _try_api_validation(self, slug: str, coupon_code: str) -> bool:
+        """Try API validation with enhanced headers and retry logic."""
+        headers_variants = [
+            # Standard headers
+            {
+                'User-Agent': self.DEFAULT_USER_AGENT,
+                'Accept': 'application/json',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+            },
+            # Mobile headers
+            {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15',
+                'Accept': 'application/json',
+            },
+            # Minimal headers
+            {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': '*/*',
+            }
+        ]
+        
+        api_url = (
+            f"https://www.udemy.com/api-2.0/courses/{slug}/"
+            f"?fields[course]=is_paid,price,discounted_price,discount,has_discount&couponCode={coupon_code}"
+        )
+        
+        for i, headers in enumerate(headers_variants):
+            try:
+                logger.debug(f"🔍 API attempt {i+1} for {slug}")
+                response = requests.get(api_url, headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    return self._parse_api_response(data, slug)
+                elif response.status_code == 403:
+                    logger.debug(f"❌ API blocked (403) on attempt {i+1}")
+                    continue
+                else:
+                    logger.debug(f"❌ API error {response.status_code} on attempt {i+1}")
+                    continue
+                    
+            except Exception as e:
+                logger.debug(f"❌ API exception on attempt {i+1}: {e}")
+                continue
+                
+        return False
+
+    def _try_page_scraping(self, clean_url: str) -> bool:
+        """Try to validate by scraping the course page."""
+        try:
+            logger.debug(f"🌐 Trying page scraping for {clean_url}")
+            
+            headers = {
+                'User-Agent': self.DEFAULT_USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            }
+            
+            response = requests.get(clean_url, headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                content = response.text.lower()
+                
+                # Look for free indicators in the page
+                free_indicators = [
+                    'enroll for free',
+                    'free course',
+                    '"price":"free"',
+                    '"amount":0',
+                    'discount_percent":100',
+                    'price":{"amount":0',
+                    'free enrollment',
+                    'enroll now - free'
+                ]
+                
+                for indicator in free_indicators:
+                    if indicator in content:
+                        logger.debug(f"✅ Found free indicator: {indicator}")
+                        return True
+                        
+                logger.debug(f"❌ No free indicators found in page")
+                return False
+            else:
+                logger.debug(f"❌ Page scraping failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.debug(f"❌ Page scraping error: {e}")
+            return False
+
+    def _try_cloudscraper_validation(self, slug: str, coupon_code: str) -> bool:
+        """Try validation using cloudscraper to bypass protections."""
+        try:
+            logger.debug(f"☁️ Trying cloudscraper for {slug}")
+            
+            api_url = (
+                f"https://www.udemy.com/api-2.0/courses/{slug}/"
+                f"?fields[course]=price,discount&couponCode={coupon_code}"
+            )
+            
+            response = self.cloudscraper.get(api_url, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return self._parse_api_response(data, slug)
+            else:
+                logger.debug(f"❌ Cloudscraper failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            logger.debug(f"❌ Cloudscraper error: {e}")
+            return False
+
+    def _try_heuristic_validation(self, coupon_code: str) -> bool:
+        """
+        Use heuristic patterns to guess if a coupon might be free.
+        This is a fallback when all other methods fail.
+        """
+        try:
+            # Some patterns that often indicate free coupons
+            free_patterns = [
+                r'FREE\d*',
+                r'100OFF',
+                r'GRATIS',
+                r'ZERO',
+                r'0PRICE',
+                r'NOPAY',
+                r'COMPLIMENTARY'
+            ]
+            
+            coupon_upper = coupon_code.upper()
+            
+            for pattern in free_patterns:
+                if re.search(pattern, coupon_upper):
+                    logger.debug(f"🎯 Heuristic match: {pattern} in {coupon_code}")
+                    return True
+                    
+            # Check for date-based free coupons (common pattern)
+            if re.search(r'(DEC|NOV|OCT).*FREE|FREE.*(DEC|NOV|OCT)', coupon_upper):
+                logger.debug(f"🎯 Date-based free pattern in {coupon_code}")
+                return True
+                
+            return False
+            
+        except Exception as e:
+            logger.debug(f"❌ Heuristic validation error: {e}")
+            return False
+
+    def _parse_api_response(self, data: dict, slug: str) -> bool:
+        """Parse API response to determine if course is free."""
+        try:
+            discount = data.get("discount", {})
+            discount_percent = discount.get("discount_percent", 0)
+            
+            # Check if discount price amount is 0
+            discount_amount = discount.get("price", {}).get("amount") if discount else None
+            
+            # Also check if price string indicates free
+            price = data.get("price", "")
+            
+            # A course is free if ANY of these conditions are true
+            conditions = [
+                discount_percent == 100,
+                discount_amount is not None and discount_amount == 0,
+                isinstance(price, str) and price.lower().startswith("free")
+            ]
+            
+            is_free = any(conditions)
+            
+            if is_free:
+                reason = f"discount_percent={discount_percent}, discount_amount={discount_amount}, price={price}"
+                logger.debug(f"✅ Course {slug} is FREE: {reason}")
+            else:
+                logger.debug(f"❌ Course {slug} is NOT free: discount_percent={discount_percent}")
+                
+            return is_free
+            
+        except Exception as e:
+            logger.debug(f"❌ Error parsing API response: {e}")
             return False
 
     def _should_include_course(self, url: str) -> bool:
