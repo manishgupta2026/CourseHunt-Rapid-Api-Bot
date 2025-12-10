@@ -14,6 +14,9 @@ from telegram.ext import (
     filters
 )
 
+# Import our multi-source scraper
+from multi_source_scraper import MultiSourceCouponScraper
+
 class UdemyBot:
     def __init__(self, api_keys):
         self.api_keys = api_keys
@@ -321,10 +324,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ An error occurred. Please try again later.")
 
 async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
-    """Check for new courses and send them to a bridge channel"""
-    api_keys = os.environ['RAPIDAPI_KEYS'].split(',')
-    bot = UdemyBot(api_keys)
-    
+    """Check for new courses from multiple sources and send them to bridge channel"""
     # Get bridge channel ID (where processing bot will read from)
     bridge_channel_id = os.environ.get('BRIDGE_CHANNEL_ID')
     if not bridge_channel_id:
@@ -342,51 +342,80 @@ async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
     new_count = 0
     total_courses = 0
     
-    # Check first 3 pages (30 courses total per check)
-    # Uses 3 API requests per hour = 72 requests/day (within 100 limit)
-    for page in range(3):
-        courses = bot.get_courses(page=page)
+    print("🚀 Starting multi-source course fetching...")
+    
+    # 1. Fetch from RapidAPI (existing functionality)
+    rapidapi_courses = []
+    api_keys_env = os.environ.get('RAPIDAPI_KEYS')
+    if api_keys_env:
+        api_keys = api_keys_env.split(',')
+        bot = UdemyBot(api_keys)
         
-        if not courses:
-            print(f"⚠️ No courses fetched from page {page}")
+        print("📡 Fetching from RapidAPI...")
+        for page in range(3):
+            courses = bot.get_courses(page=page)
+            if courses:
+                for course in courses:
+                    course_url = course.get('coupon', '')
+                    if course_url and course_url.startswith('http'):
+                        rapidapi_courses.append({
+                            'title': course.get('title', 'Unknown Course'),
+                            'url': course_url,
+                            'source': 'RapidAPI'
+                        })
+        print(f"📡 RapidAPI: Found {len(rapidapi_courses)} courses")
+    
+    # 2. Fetch from multiple coupon sites
+    multi_scraper = MultiSourceCouponScraper()
+    scraped_courses = []
+    
+    try:
+        scraped_courses = await multi_scraper.scrape_all_sources()
+        print(f"🌐 Multi-source scrapers: Found {len(scraped_courses)} courses")
+    except Exception as e:
+        print(f"❌ Multi-source scraping failed: {str(e)}")
+    
+    # 3. Combine all sources
+    all_courses = rapidapi_courses + scraped_courses
+    total_courses = len(all_courses)
+    
+    # 4. Remove duplicates and send new courses
+    for course in all_courses:
+        course_url = course['url']
+        
+        # Skip if already sent
+        if course_url in sent_ids:
             continue
         
-        total_courses += len(courses)
-        print(f"📚 Page {page}: Found {len(courses)} courses")
-        
-        # Send only NEW courses
-        for course in courses:
-            # Use coupon URL as unique identifier
-            course_id = course.get('coupon', '')
+        # Send course URL to bridge channel
+        try:
+            # Add source info to message
+            message_text = f"{course_url}\n📍 Source: {course['source']}"
             
-            if not course_id or not course_id.startswith('http'):
-                continue
+            await context.bot.send_message(
+                chat_id=bridge_channel_id,
+                text=message_text,
+                disable_web_page_preview=True
+            )
+            sent_ids.add(course_url)
+            new_count += 1
+            print(f"✅ Sent NEW course from {course['source']}: {course['title'][:50]}")
             
-            # Skip if already sent
-            if course_id in sent_ids:
-                continue
-            
-            # Send course URL to bridge channel
-            try:
-                await context.bot.send_message(
-                    chat_id=bridge_channel_id,
-                    text=course_id,
-                    disable_web_page_preview=True
-                )
-                sent_ids.add(course_id)
-                new_count += 1
-                print(f"✅ Sent NEW course: {course.get('title', 'Unknown')[:50]}")
-                
-                # Delay to avoid Telegram flood control (max 20 msgs/min to channels)
-                await asyncio.sleep(3)
-            except Exception as e:
-                print(f"❌ Failed to send: {str(e)}")
+            # Delay to avoid Telegram flood control (max 20 msgs/min to channels)
+            await asyncio.sleep(3)
+        except Exception as e:
+            print(f"❌ Failed to send: {str(e)}")
     
-    # Keep only last 1000 IDs to prevent memory issues
-    if len(sent_ids) > 1000:
-        context.bot_data['sent_course_ids'] = set(list(sent_ids)[-1000:])
+    # Keep only last 2000 IDs to prevent memory issues (increased for multiple sources)
+    if len(sent_ids) > 2000:
+        context.bot_data['sent_course_ids'] = set(list(sent_ids)[-2000:])
     
-    print(f"📊 Summary: {total_courses} courses checked, {new_count} new courses sent, {total_courses - new_count} duplicates skipped")
+    print(f"📊 MULTI-SOURCE Summary:")
+    print(f"   📚 Total courses found: {total_courses}")
+    print(f"   ✅ New courses sent: {new_count}")
+    print(f"   🔄 Duplicates skipped: {total_courses - new_count}")
+    print(f"   📡 RapidAPI: {len(rapidapi_courses)} courses")
+    print(f"   🌐 Other sources: {len(scraped_courses)} courses")
 
 def main():
     # Create Telegram Application
@@ -408,20 +437,27 @@ def main():
         handle_udemy_url
     ))
     
-    # Set up periodic job to check for new courses every 1 hour
-    # Checks 3 pages per hour = 30 courses per check
-    # Uses 72 requests/day (well within 100/day free limit)
+    # Set up periodic job to check for new courses every 2 hours
+    # Multi-source fetching: RapidAPI + web scrapers
+    # RapidAPI: 3 pages per check = 36 requests/day (within 100/day limit)
+    # Web scrapers: No API limits, respectful scraping with delays
     job_queue = application.job_queue
     job_queue.run_repeating(
         check_and_send_new_courses,
-        interval=3600,  # 1 hour = 3600 seconds
+        interval=7200,  # 2 hours = 7200 seconds (12 checks per day)
         first=10  # Start 10 seconds after bot starts
     )
     
     # Start bot
-    print("🚀 Bot is running - checking for new courses every hour...")
-    print("📊 Checking 3 pages per hour = 30 courses per check")
-    print("📊 API Usage: 72 requests/day (within 100/day free limit)")
+    print("🚀 Multi-Source Udemy Bot is running!")
+    print("📊 Checking multiple sources every 2 hours:")
+    print("   📡 RapidAPI: 3 pages per check")
+    print("   🌐 Real.discount: Free courses")
+    print("   🌐 Discudemy: Discounted courses") 
+    print("   🌐 CourseVania: Course deals")
+    print("   🌐 UdemyFreebies: Free courses")
+    print("📊 API Usage: 36 RapidAPI requests/day (within 100/day limit)")
+    print("📊 Expected: 50-200+ courses per check from all sources")
     application.run_polling()
 
 if __name__ == "__main__":
