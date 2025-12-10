@@ -387,7 +387,10 @@ async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
     
     logger.info("🚀 Starting multi-source course fetching...")
     
-    # 1. Fetch from RapidAPI
+    # Initialize scraper for validation
+    multi_scraper = MultiSourceCouponScraper(validate_coupons=True)
+    
+    # 1. Fetch from RapidAPI and validate coupons
     rapidapi_courses = []
     api_keys_env = os.environ.get('RAPIDAPI_KEYS')
     if api_keys_env:
@@ -395,20 +398,28 @@ async def check_and_send_new_courses(context: ContextTypes.DEFAULT_TYPE):
         bot = UdemyBot(api_keys)
         
         logger.info("📡 Fetching from RapidAPI...")
+        rapidapi_total = 0
+        rapidapi_filtered = 0
+        
         for page in range(3):
             courses = bot.get_courses(page=page)
             if courses:
                 for course in courses:
                     course_url = course.get('coupon', '')
                     if course_url and course_url.startswith('http'):
-                        rapidapi_courses.append({
-                            'title': course.get('title', 'Unknown Course'),
-                            'url': course_url
-                        })
-        logger.info(f"📡 RapidAPI: Found {len(rapidapi_courses)} courses")
+                        rapidapi_total += 1
+                        # Validate coupon before adding to queue
+                        if multi_scraper.is_free_coupon(course_url):
+                            rapidapi_courses.append({
+                                'title': course.get('title', 'Unknown Course'),
+                                'url': course_url
+                            })
+                        else:
+                            rapidapi_filtered += 1
+        
+        logger.info(f"📡 RapidAPI: Validated {len(rapidapi_courses)} of {rapidapi_total} courses ({rapidapi_filtered} filtered out)")
     
     # 2. Fetch from multiple coupon sites with validation enabled
-    multi_scraper = MultiSourceCouponScraper(validate_coupons=True)
     scraped_courses = []
     
     try:
