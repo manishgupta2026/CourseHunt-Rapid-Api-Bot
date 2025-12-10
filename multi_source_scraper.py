@@ -1,75 +1,197 @@
 """
 Multi-Source Coupon Scraper
-Integrates multiple coupon sources with the RapidAPI bot
+Fetches free Udemy courses from multiple sources and validates 100% off coupons
 """
 
 import asyncio
-import concurrent.futures
-import json
+import logging
 import re
-import threading
 import time
-from datetime import datetime
-from urllib.parse import urlparse, parse_qs
+from typing import Optional
+from urllib.parse import urlparse, parse_qs, urlencode
 
 import requests
 from bs4 import BeautifulSoup as bs
 import cloudscraper
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 
 class MultiSourceCouponScraper:
-    """Scraper that fetches coupons from multiple sources"""
+    """Scraper that fetches 100% free Udemy courses from multiple sources"""
     
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36'
-        })
-        self.cloudscraper = cloudscraper.create_scraper()
+    DEFAULT_USER_AGENT = (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    )
+    
+    COUPON_PARAM_NAMES = ['couponcode', 'coupon_code', 'coupon']
+    
+    def __init__(self, validate_coupons: bool = True, request_timeout: int = 30):
+        """
+        Initialize the scraper.
         
-    def cleanup_link(self, link: str) -> str:
-        """Clean up Udemy course links"""
-        if "udemy.com" not in link:
+        Args:
+            validate_coupons: Whether to validate coupons via Udemy API
+            request_timeout: Default timeout for HTTP requests in seconds
+        """
+        self.validate_coupons = validate_coupons
+        self.request_timeout = request_timeout
+        self.session = requests.Session()
+        self.session.headers.update({'User-Agent': self.DEFAULT_USER_AGENT})
+        self.cloudscraper = cloudscraper.create_scraper()
+        self._validation_cache: dict[str, bool] = {}
+        
+    def cleanup_link(self, link: str) -> Optional[str]:
+        """
+        Clean up Udemy course links and preserve coupon code.
+        
+        Removes tracking parameters while keeping coupon-related params.
+        
+        Args:
+            link: Raw URL that may contain tracking parameters
+            
+        Returns:
+            Cleaned URL with only coupon parameters, or None if invalid
+        """
+        if not link or "udemy.com" not in link:
             return None
             
-        # Parse URL and extract course path
         parsed = urlparse(link)
         if "/course/" not in parsed.path:
             return None
+        
+        # Normalize path (remove trailing slashes, ensure leading slash)
+        path = parsed.path.rstrip('/')
+        if not path.startswith('/'):
+            path = '/' + path
             
-        # Clean URL - remove tracking parameters but keep coupon code
         query_params = parse_qs(parsed.query)
         clean_params = {}
         
-        # Keep only coupon-related parameters
         for key, value in query_params.items():
-            if key.lower() in ['couponcode', 'coupon_code', 'coupon']:
+            if key.lower() in self.COUPON_PARAM_NAMES:
                 clean_params[key] = value[0] if isinstance(value, list) else value
                 
-        # Reconstruct clean URL
-        clean_url = f"https://www.udemy.com{parsed.path}"
+        clean_url = f"https://www.udemy.com{path}"
         if clean_params:
-            params_str = "&".join([f"{k}={v}" for k, v in clean_params.items()])
-            clean_url += f"?{params_str}"
+            clean_url += f"?{urlencode(clean_params)}"
             
         return clean_url
 
-    def scrape_real_discount(self) -> list:
-        """Scrape Real.discount for free Udemy courses"""
-        try:
-            print("🔍 Scraping Real.discount...")
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Host": "cdn.real.discount",
-                "Connection": "Keep-Alive",
-                "referer": "https://www.real.discount/",
-            }
+    def is_free_coupon(self, url: str) -> bool:
+        """
+        Check via Udemy API if the course coupon provides 100% discount.
+        
+        Makes an API call to Udemy to verify the coupon is valid and
+        provides a full discount.
+        
+        Args:
+            url: Udemy course URL with coupon code
             
-            url = "https://cdn.real.discount/api/courses?page=1&limit=100&sortBy=sale_start&store=Udemy&freeOnly=true"
-            response = requests.get(url, headers=headers, timeout=30)
+        Returns:
+            True if the coupon is valid and provides 100% discount
+        """
+        clean_url = self.cleanup_link(url)
+        if not clean_url:
+            return False
+        
+        # Check cache first to avoid redundant API calls
+        if clean_url in self._validation_cache:
+            return self._validation_cache[clean_url]
+        
+        try:
+            parsed = urlparse(clean_url)
+            path_parts = parsed.path.split("/course/")
+            if len(path_parts) < 2:
+                return False
+                
+            slug = path_parts[-1].strip("/")
+            query_params = parse_qs(parsed.query)
+            
+            # Find coupon code from various parameter names
+            coupon_code = ""
+            for param_name in self.COUPON_PARAM_NAMES:
+                for key, value in query_params.items():
+                    if key.lower() == param_name:
+                        coupon_code = value[0] if isinstance(value, list) else value
+                        break
+                if coupon_code:
+                    break
+            
+            if not coupon_code:
+                self._validation_cache[clean_url] = False
+                return False
+            
+            # Query Udemy API with coupon code
+            api_url = (
+                f"https://www.udemy.com/api-2.0/courses/{slug}/"
+                f"?fields[course]=price,discount&couponCode={coupon_code}"
+            )
+            
+            response = self.session.get(
+                api_url,
+                timeout=15,
+                headers={'Accept': 'application/json'}
+            )
             
             if response.status_code != 200:
-                print(f"❌ Real.discount failed: {response.status_code}")
+                self._validation_cache[clean_url] = False
+                return False
+                
+            data = response.json()
+            
+            # Check for 100% discount
+            discount = data.get("discount", {})
+            is_free = discount.get("discount_percent") == 100
+            
+            # Also check if price is 0
+            price = data.get("price", "")
+            if isinstance(price, str) and price.startswith("Free"):
+                is_free = True
+            
+            self._validation_cache[clean_url] = is_free
+            return is_free
+            
+        except Exception as e:
+            logger.debug(f"Coupon validation error for {url}: {e}")
+            self._validation_cache[clean_url] = False
+            return False
+
+    def _should_include_course(self, url: str) -> bool:
+        """Check if course should be included based on validation settings."""
+        if not self.validate_coupons:
+            return True
+        return self.is_free_coupon(url)
+
+    def scrape_real_discount(self) -> list:
+        """
+        Scrape Real.discount for free Udemy courses.
+        
+        Real.discount provides a JSON API that returns course data directly.
+        """
+        try:
+            logger.info("🔍 Scraping Real.discount...")
+            headers = {
+                "User-Agent": self.DEFAULT_USER_AGENT,
+                "Host": "cdn.real.discount",
+                "Connection": "Keep-Alive",
+                "Referer": "https://www.real.discount/",
+            }
+            
+            url = (
+                "https://cdn.real.discount/api/courses"
+                "?page=1&limit=100&sortBy=sale_start&store=Udemy&freeOnly=true"
+            )
+            response = requests.get(url, headers=headers, timeout=self.request_timeout)
+            
+            if response.status_code != 200:
+                logger.warning(f"❌ Real.discount failed: HTTP {response.status_code}")
                 return []
                 
             data = response.json()
@@ -79,40 +201,46 @@ class MultiSourceCouponScraper:
                 if item.get("store") == "Sponsored":
                     continue
                     
-                title = item.get("name", "")
                 link = item.get("url", "")
-                
                 clean_link = self.cleanup_link(link)
-                if clean_link:
+                
+                if clean_link and self._should_include_course(link):
                     courses.append({
-                        'title': title,
-                        'url': clean_link,
-                        'source': 'Real.discount'
+                        'title': item.get("name", ""),
+                        'url': clean_link
                     })
                     
-            print(f"✅ Real.discount: Found {len(courses)} courses")
+            logger.info(f"✅ Real.discount: Found {len(courses)} valid courses")
             return courses
             
         except Exception as e:
-            print(f"❌ Real.discount error: {str(e)}")
+            logger.error(f"❌ Real.discount error: {e}")
             return []
 
     def scrape_discudemy(self) -> list:
-        """Scrape Discudemy for free courses"""
+        """
+        Scrape Discudemy for free courses.
+        
+        Discudemy requires two-step scraping:
+        1. Get course list from main pages
+        2. Follow each link to get the actual Udemy URL
+        """
         try:
-            print("🔍 Scraping Discudemy...")
+            logger.info("🔍 Scraping Discudemy...")
             courses = []
             headers = {
-                "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "User-Agent": self.DEFAULT_USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "referer": "https://www.discudemy.com",
+                "Referer": "https://www.discudemy.com",
             }
 
-            # Scrape first 3 pages to avoid being too aggressive
+            # Scrape first 3 pages
             for page in range(1, 4):
                 try:
                     url = f"https://www.discudemy.com/all/{page}"
-                    response = requests.get(url, headers=headers, timeout=30)
+                    response = self.session.get(
+                        url, headers=headers, timeout=self.request_timeout
+                    )
                     
                     if response.status_code != 200:
                         continue
@@ -129,165 +257,192 @@ class MultiSourceCouponScraper:
                             course_url = item["href"].split("/")[-1]
                             detail_url = f"https://www.discudemy.com/go/{course_url}"
                             
-                            # Get course details
-                            detail_response = requests.get(detail_url, headers=headers, timeout=15)
+                            # Follow to get actual Udemy link
+                            detail_response = self.session.get(
+                                detail_url, headers=headers, timeout=15
+                            )
+                            
                             if detail_response.status_code == 200:
                                 detail_soup = bs(detail_response.content, 'html.parser')
                                 segment = detail_soup.find("div", {"class": "ui segment"})
+                                
                                 if segment and segment.a:
                                     link = segment.a["href"]
                                     clean_link = self.cleanup_link(link)
-                                    if clean_link:
+                                    
+                                    if clean_link and self._should_include_course(link):
                                         courses.append({
                                             'title': title,
-                                            'url': clean_link,
-                                            'source': 'Discudemy'
+                                            'url': clean_link
                                         })
-                                        
-                            # Small delay to be respectful
-                            time.sleep(0.5)
                             
-                        except Exception as e:
+                            # Rate limiting - be respectful to the server
+                            time.sleep(0.3)
+                            
+                        except Exception:
                             continue
-                            
+                    
                     # Delay between pages
                     time.sleep(1)
                     
-                except Exception as e:
+                except Exception:
                     continue
                     
-            print(f"✅ Discudemy: Found {len(courses)} courses")
+            logger.info(f"✅ Discudemy: Found {len(courses)} valid courses")
             return courses
             
         except Exception as e:
-            print(f"❌ Discudemy error: {str(e)}")
+            logger.error(f"❌ Discudemy error: {e}")
             return []
 
     def scrape_course_vania(self) -> list:
-        """Scrape CourseVania for free courses"""
+        """
+        Scrape CourseVania for free courses.
+        
+        CourseVania uses WordPress with AJAX loading:
+        1. Get the page to extract the security nonce
+        2. Make AJAX request to get course grid
+        3. Parse each course detail page for Udemy links
+        """
         try:
-            print("🔍 Scraping CourseVania...")
+            logger.info("🔍 Scraping CourseVania...")
             courses = []
             
-            # Get main page to extract nonce
-            response = requests.get("https://coursevania.com/courses/", timeout=30)
+            # Step 1: Get main page to extract nonce
+            response = self.session.get(
+                "https://coursevania.com/courses/",
+                timeout=self.request_timeout
+            )
+            
             if response.status_code != 200:
-                print("❌ CourseVania: Failed to get main page")
+                logger.warning("❌ CourseVania: Failed to get main page")
                 return []
-                
-            # Extract nonce for AJAX request
+            
+            # Step 2: Extract AJAX nonce from page
             nonce_match = re.search(r"load_content\":\"(.*?)\"", response.text)
             if not nonce_match:
-                print("❌ CourseVania: Nonce not found")
+                logger.warning("❌ CourseVania: Nonce not found")
                 return []
                 
             nonce = nonce_match.group(1)
             
-            # Make AJAX request for courses
-            ajax_url = f"https://coursevania.com/wp-admin/admin-ajax.php?&template=courses/grid&args={{%22posts_per_page%22:%22100%22}}&action=stm_lms_load_content&sort=date_high&nonce={nonce}"
-            ajax_response = requests.get(ajax_url, timeout=30)
+            # Step 3: Make AJAX request for course data
+            ajax_url = (
+                f"https://coursevania.com/wp-admin/admin-ajax.php"
+                f"?&template=courses/grid"
+                f"&args={{%22posts_per_page%22:%22100%22}}"
+                f"&action=stm_lms_load_content&sort=date_high&nonce={nonce}"
+            )
+            ajax_response = self.session.get(ajax_url, timeout=self.request_timeout)
             
             if ajax_response.status_code != 200:
-                print("❌ CourseVania: AJAX request failed")
+                logger.warning("❌ CourseVania: AJAX request failed")
                 return []
                 
             data = ajax_response.json()
             soup = bs(data.get("content", ""), 'html.parser')
             page_items = soup.find_all("div", {"class": "stm_lms_courses__single--title"})
             
-            for item in page_items[:20]:  # Limit to first 20 to avoid being aggressive
+            # Step 4: Parse each course detail page
+            for item in page_items[:20]:  # Limit to avoid being aggressive
                 try:
                     title = item.h5.string if item.h5 else ""
                     if not title or not item.a:
                         continue
                         
                     course_page_url = item.a["href"]
+                    detail_response = self.session.get(course_page_url, timeout=15)
                     
-                    # Get course details page
-                    detail_response = requests.get(course_page_url, timeout=15)
                     if detail_response.status_code == 200:
                         detail_soup = bs(detail_response.content, 'html.parser')
+                        udemy_links = detail_soup.find_all(
+                            "a", href=re.compile(r"udemy\.com")
+                        )
                         
-                        # Look for Udemy link
-                        udemy_links = detail_soup.find_all("a", href=re.compile(r"udemy\.com"))
                         for link_elem in udemy_links:
                             link = link_elem.get("href", "")
                             clean_link = self.cleanup_link(link)
-                            if clean_link:
+                            
+                            if clean_link and self._should_include_course(link):
                                 courses.append({
                                     'title': title,
-                                    'url': clean_link,
-                                    'source': 'CourseVania'
+                                    'url': clean_link
                                 })
                                 break
-                                
-                    # Small delay
-                    time.sleep(0.5)
                     
-                except Exception as e:
+                    # Rate limiting
+                    time.sleep(0.3)
+                    
+                except Exception:
                     continue
                     
-            print(f"✅ CourseVania: Found {len(courses)} courses")
+            logger.info(f"✅ CourseVania: Found {len(courses)} valid courses")
             return courses
             
         except Exception as e:
-            print(f"❌ CourseVania error: {str(e)}")
+            logger.error(f"❌ CourseVania error: {e}")
             return []
 
     def scrape_udemy_freebies(self) -> list:
-        """Scrape UdemyFreebies for free courses"""
+        """
+        Scrape UdemyFreebies for free courses.
+        
+        Simple scraper that finds all Udemy links on the page.
+        """
         try:
-            print("🔍 Scraping UdemyFreebies...")
+            logger.info("🔍 Scraping UdemyFreebies...")
             courses = []
             
-            # Try to get courses from UdemyFreebies
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            }
-            
-            # UdemyFreebies often changes structure, so this is a basic implementation
-            response = requests.get("https://www.udemyfreebies.com/free-udemy-courses", headers=headers, timeout=30)
+            response = self.session.get(
+                "https://www.udemyfreebies.com/free-udemy-courses",
+                timeout=self.request_timeout
+            )
             
             if response.status_code != 200:
-                print("❌ UdemyFreebies: Failed to get page")
+                logger.warning("❌ UdemyFreebies: Failed to get page")
                 return []
                 
             soup = bs(response.content, 'html.parser')
-            
-            # Look for course links (structure may vary)
             course_links = soup.find_all("a", href=re.compile(r"udemy\.com"))
             
             for link_elem in course_links[:30]:  # Limit to first 30
                 try:
                     link = link_elem.get("href", "")
-                    title = link_elem.get_text(strip=True) or "Udemy Course"
-                    
                     clean_link = self.cleanup_link(link)
-                    if clean_link:
+                    
+                    if clean_link and self._should_include_course(link):
+                        title = link_elem.get_text(strip=True) or "Udemy Course"
                         courses.append({
-                            'title': title[:100],  # Limit title length
-                            'url': clean_link,
-                            'source': 'UdemyFreebies'
+                            'title': title[:100],  # Truncate long titles
+                            'url': clean_link
                         })
                         
-                except Exception as e:
+                except Exception:
                     continue
                     
-            print(f"✅ UdemyFreebies: Found {len(courses)} courses")
+            logger.info(f"✅ UdemyFreebies: Found {len(courses)} valid courses")
             return courses
             
         except Exception as e:
-            print(f"❌ UdemyFreebies error: {str(e)}")
+            logger.error(f"❌ UdemyFreebies error: {e}")
             return []
 
     async def scrape_all_sources(self) -> list:
-        """Scrape all sources concurrently"""
-        print("🚀 Starting multi-source scraping...")
+        """
+        Scrape all sources concurrently and return unique 100% free courses.
         
-        # Run scrapers concurrently
+        Uses asyncio to run all scrapers in parallel for better performance.
+        Deduplicates results based on URL.
+        
+        Returns:
+            List of unique courses with validated coupons
+        """
+        logger.info("🚀 Starting multi-source scraping...")
+        start_time = time.time()
+        
         loop = asyncio.get_event_loop()
         
+        # Run all scrapers concurrently
         tasks = [
             loop.run_in_executor(None, self.scrape_real_discount),
             loop.run_in_executor(None, self.scrape_discudemy),
@@ -303,7 +458,7 @@ class MultiSourceCouponScraper:
             if isinstance(result, list):
                 all_courses.extend(result)
             elif isinstance(result, Exception):
-                print(f"❌ Scraper error: {result}")
+                logger.error(f"❌ Scraper error: {result}")
                 
         # Remove duplicates based on URL
         seen_urls = set()
@@ -314,21 +469,25 @@ class MultiSourceCouponScraper:
             if url not in seen_urls:
                 seen_urls.add(url)
                 unique_courses.append(course)
-                
-        print(f"📊 Total unique courses found: {len(unique_courses)}")
+        
+        elapsed = time.time() - start_time
+        logger.info(
+            f"📊 Scraping complete: {len(unique_courses)} unique courses "
+            f"found in {elapsed:.2f}s"
+        )
+        
         return unique_courses
 
 
-# Test function
 async def test_scrapers():
-    scraper = MultiSourceCouponScraper()
+    """Test function to verify scrapers are working."""
+    scraper = MultiSourceCouponScraper(validate_coupons=True)
     courses = await scraper.scrape_all_sources()
     
-    print(f"\n📋 Sample courses:")
-    for i, course in enumerate(courses[:5]):
-        print(f"{i+1}. {course['title'][:50]}... ({course['source']})")
-        print(f"   URL: {course['url']}")
-        print()
+    print(f"\n📋 Found {len(courses)} courses:\n")
+    for i, course in enumerate(courses[:10]):
+        print(f"{i+1}. {course['title'][:60]}...")
+        print(f"   {course['url']}\n")
 
 
 if __name__ == "__main__":
