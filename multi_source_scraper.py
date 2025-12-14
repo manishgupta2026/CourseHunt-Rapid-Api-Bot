@@ -7,10 +7,12 @@ import asyncio
 import logging
 import re
 import time
-from typing import Optional
+from typing import Optional, Dict, Any
 from urllib.parse import urlparse, parse_qs, urlencode
 
 import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 from bs4 import BeautifulSoup as bs
 import cloudscraper
 
@@ -42,10 +44,42 @@ class MultiSourceCouponScraper:
         """
         self.validate_coupons = validate_coupons
         self.request_timeout = request_timeout
-        self.session = requests.Session()
-        self.session.headers.update({'User-Agent': self.DEFAULT_USER_AGENT})
+        
+        # Enhanced session with connection pooling and retry strategy
+        self.session = self._create_enhanced_session()
         self.cloudscraper = cloudscraper.create_scraper()
+        
+        # Caches and statistics
         self._validation_cache: dict[str, bool] = {}
+        self._validation_stats: Dict[str, int] = {
+            'api_success': 0,
+            'page_scraping_success': 0,
+            'cloudscraper_success': 0,
+            'heuristic_success': 0,
+            'total_attempts': 0,
+            'cache_hits': 0
+        }
+        
+    def _create_enhanced_session(self) -> requests.Session:
+        """Create a session with connection pooling and retry strategy."""
+        session = requests.Session()
+        
+        # Connection pooling for better performance
+        adapter = HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=Retry(
+                total=3,
+                backoff_factor=0.3,
+                status_forcelist=[500, 502, 503, 504]
+            )
+        )
+        
+        session.mount('http://', adapter)
+        session.mount('https://', adapter)
+        session.headers.update({'User-Agent': self.DEFAULT_USER_AGENT})
+        
+        return session
         
     def cleanup_link(self, link: str) -> Optional[str]:
         """
@@ -107,8 +141,11 @@ class MultiSourceCouponScraper:
         # Check cache first to avoid redundant API calls
         if clean_url in self._validation_cache:
             cached_result = self._validation_cache[clean_url]
+            self._validation_stats['cache_hits'] += 1
             logger.debug(f"📦 Cache hit for {clean_url}: {cached_result}")
             return cached_result
+        
+        self._validation_stats['total_attempts'] += 1
         
         try:
             parsed = urlparse(clean_url)
@@ -210,11 +247,14 @@ class MultiSourceCouponScraper:
         for i, headers in enumerate(headers_variants):
             try:
                 logger.debug(f"🔍 API attempt {i+1} for {slug}")
-                response = requests.get(api_url, headers=headers, timeout=10)
+                response = self.session.get(api_url, headers=headers, timeout=10)
                 
                 if response.status_code == 200:
                     data = response.json()
-                    return self._parse_api_response(data, slug)
+                    result = self._parse_api_response(data, slug)
+                    if result:
+                        self._validation_stats['api_success'] += 1
+                    return result
                 elif response.status_code == 403:
                     logger.debug(f"❌ API blocked (403) on attempt {i+1}")
                     continue
@@ -262,6 +302,7 @@ class MultiSourceCouponScraper:
                 for indicator in free_indicators:
                     if indicator in content:
                         logger.debug(f"✅ Found free indicator: {indicator}")
+                        self._validation_stats['page_scraping_success'] += 1
                         return True
                         
                 logger.debug(f"❌ No free indicators found in page")
@@ -288,7 +329,10 @@ class MultiSourceCouponScraper:
             
             if response.status_code == 200:
                 data = response.json()
-                return self._parse_api_response(data, slug)
+                result = self._parse_api_response(data, slug)
+                if result:
+                    self._validation_stats['cloudscraper_success'] += 1
+                return result
             else:
                 logger.debug(f"❌ Cloudscraper failed: {response.status_code}")
                 return False
@@ -319,11 +363,13 @@ class MultiSourceCouponScraper:
             for pattern in free_patterns:
                 if re.search(pattern, coupon_upper):
                     logger.debug(f"🎯 Heuristic match: {pattern} in {coupon_code}")
+                    self._validation_stats['heuristic_success'] += 1
                     return True
                     
             # Check for date-based free coupons (common pattern)
             if re.search(r'(DEC|NOV|OCT).*FREE|FREE.*(DEC|NOV|OCT)', coupon_upper):
                 logger.debug(f"🎯 Date-based free pattern in {coupon_code}")
+                self._validation_stats['heuristic_success'] += 1
                 return True
                 
             return False
@@ -499,135 +545,177 @@ class MultiSourceCouponScraper:
 
     def scrape_course_vania(self) -> list:
         """
-        Scrape CourseVania for free courses.
+        Scrape CourseVania for free courses with enhanced retry logic.
         
         CourseVania uses WordPress with AJAX loading:
         1. Get the page to extract the security nonce
         2. Make AJAX request to get course grid
         3. Parse each course detail page for Udemy links
         """
-        try:
-            logger.info("🔍 Scraping CourseVania...")
-            courses = []
-            
-            # Step 1: Get main page to extract nonce
-            response = self.session.get(
-                "https://coursevania.com/courses/",
-                timeout=self.request_timeout
-            )
-            
-            if response.status_code != 200:
-                logger.warning("❌ CourseVania: Failed to get main page")
-                return []
-            
-            # Step 2: Extract AJAX nonce from page
-            nonce_match = re.search(r"load_content\":\"(.*?)\"", response.text)
-            if not nonce_match:
-                logger.warning("❌ CourseVania: Nonce not found")
-                return []
-                
-            nonce = nonce_match.group(1)
-            
-            # Step 3: Make AJAX request for course data
-            ajax_url = (
-                f"https://coursevania.com/wp-admin/admin-ajax.php"
-                f"?&template=courses/grid"
-                f"&args={{%22posts_per_page%22:%22100%22}}"
-                f"&action=stm_lms_load_content&sort=date_high&nonce={nonce}"
-            )
-            ajax_response = self.session.get(ajax_url, timeout=self.request_timeout)
-            
-            if ajax_response.status_code != 200:
-                logger.warning("❌ CourseVania: AJAX request failed")
-                return []
-                
-            data = ajax_response.json()
-            soup = bs(data.get("content", ""), 'html.parser')
-            page_items = soup.find_all("div", {"class": "stm_lms_courses__single--title"})
-            
-            # Step 4: Parse each course detail page
-            for item in page_items[:20]:  # Limit to avoid being aggressive
-                try:
-                    title = item.h5.string if item.h5 else ""
-                    if not title or not item.a:
-                        continue
-                        
-                    course_page_url = item.a["href"]
-                    detail_response = self.session.get(course_page_url, timeout=15)
-                    
-                    if detail_response.status_code == 200:
-                        detail_soup = bs(detail_response.content, 'html.parser')
-                        udemy_links = detail_soup.find_all(
-                            "a", href=re.compile(r"udemy\.com")
-                        )
-                        
-                        for link_elem in udemy_links:
-                            link = link_elem.get("href", "")
-                            clean_link = self.cleanup_link(link)
-                            
-                            if clean_link and self._should_include_course(link):
-                                courses.append({
-                                    'title': title,
-                                    'url': clean_link
-                                })
-                                break
-                    
-                    # Rate limiting
-                    time.sleep(0.3)
-                    
-                except Exception:
-                    continue
-                    
-            logger.info(f"✅ CourseVania: Found {len(courses)} valid courses")
-            return courses
-            
-        except Exception as e:
-            logger.error(f"❌ CourseVania error: {e}")
-            return []
-
-    def scrape_udemy_freebies(self) -> list:
-        """
-        Scrape UdemyFreebies for free courses.
+        logger.info("🔍 Scraping CourseVania...")
         
-        Simple scraper that finds all Udemy links on the page.
-        """
-        try:
-            logger.info("🔍 Scraping UdemyFreebies...")
-            courses = []
-            
-            response = self.session.get(
-                "https://www.udemyfreebies.com/free-udemy-courses",
-                timeout=self.request_timeout
-            )
-            
-            if response.status_code != 200:
-                logger.warning("❌ UdemyFreebies: Failed to get page")
-                return []
+        # Try multiple approaches with different headers
+        headers_variants = [
+            {
+                'User-Agent': self.DEFAULT_USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+            },
+            {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+            {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            }
+        ]
+        
+        for attempt, headers in enumerate(headers_variants, 1):
+            try:
+                logger.debug(f"CourseVania attempt {attempt}/3")
+                courses = self._scrape_course_vania_with_headers(headers)
                 
-            soup = bs(response.content, 'html.parser')
-            course_links = soup.find_all("a", href=re.compile(r"udemy\.com"))
-            
-            for link_elem in course_links[:30]:  # Limit to first 30
-                try:
-                    link = link_elem.get("href", "")
-                    clean_link = self.cleanup_link(link)
+                if courses:
+                    logger.info(f"✅ CourseVania: Found {len(courses)} valid courses (attempt {attempt})")
+                    return courses
+                else:
+                    logger.debug(f"CourseVania attempt {attempt} returned no courses")
                     
-                    if clean_link and self._should_include_course(link):
-                        title = link_elem.get_text(strip=True) or "Udemy Course"
-                        courses.append({
-                            'title': title[:100],  # Truncate long titles
-                            'url': clean_link
-                        })
-                        
-                except Exception:
+            except Exception as e:
+                logger.debug(f"CourseVania attempt {attempt} failed: {e}")
+                
+            # Exponential backoff between attempts
+            if attempt < len(headers_variants):
+                time.sleep(2 ** (attempt - 1))  # 1s, 2s delays
+        
+        logger.warning("❌ CourseVania: All attempts failed")
+        return []
+    
+    def _scrape_course_vania_with_headers(self, headers: dict) -> list:
+        """Scrape CourseVania with specific headers."""
+        courses = []
+        
+        # Step 1: Get main page to extract nonce
+        response = requests.get(
+            "https://coursevania.com/courses/",
+            headers=headers,
+            timeout=self.request_timeout
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to get main page: {response.status_code}")
+        
+        # Step 2: Extract AJAX nonce from page
+        nonce_match = re.search(r"load_content\":\"(.*?)\"", response.text)
+        if not nonce_match:
+            raise Exception("Nonce not found in page")
+            
+        nonce = nonce_match.group(1)
+        
+        # Step 3: Make AJAX request for course data
+        ajax_url = (
+            f"https://coursevania.com/wp-admin/admin-ajax.php"
+            f"?&template=courses/grid"
+            f"&args={{%22posts_per_page%22:%22100%22}}"
+            f"&action=stm_lms_load_content&sort=date_high&nonce={nonce}"
+        )
+        ajax_response = requests.get(ajax_url, headers=headers, timeout=self.request_timeout)
+        
+        if ajax_response.status_code != 200:
+            raise Exception(f"AJAX request failed: {ajax_response.status_code}")
+            
+        data = ajax_response.json()
+        soup = bs(data.get("content", ""), 'html.parser')
+        page_items = soup.find_all("div", {"class": "stm_lms_courses__single--title"})
+        
+        # Step 4: Parse each course detail page
+        for item in page_items[:20]:  # Limit to avoid being aggressive
+            try:
+                title = item.h5.string if item.h5 else ""
+                if not title or not item.a:
                     continue
                     
-            logger.info(f"✅ UdemyFreebies: Found {len(courses)} valid courses")
-            return courses
-            
-        except Exception as e:
-            logger.error(f"❌ UdemyFreebies error: {e}")
-            return []
+                course_page_url = item.a["href"]
+                detail_response = requests.get(course_page_url, headers=headers, timeout=15)
+                
+                if detail_response.status_code == 200:
+                    detail_soup = bs(detail_response.content, 'html.parser')
+                    udemy_links = detail_soup.find_all(
+                        "a", href=re.compile(r"udemy\.com")
+                    )
+                    
+                    for link_elem in udemy_links:
+                        link = link_elem.get("href", "")
+                        clean_link = self.cleanup_link(link)
+                        
+                        if clean_link and self._should_include_course(link):
+                            courses.append({
+                                'title': title,
+                                'url': clean_link
+                            })
+                            break
+                
+                # Rate limiting
+                time.sleep(0.3)
+                
+            except Exception:
+                continue
+                
+        return courses
+
+    def get_validation_stats(self) -> Dict[str, Any]:
+        """
+        Get detailed validation statistics for monitoring and debugging.
+        
+        Returns:
+            Dictionary with validation method success rates and performance metrics
+        """
+        total_attempts = self._validation_stats['total_attempts']
+        
+        if total_attempts == 0:
+            return {
+                'total_attempts': 0,
+                'cache_hits': 0,
+                'success_rate': 0.0,
+                'method_breakdown': {
+                    'api_success': 0,
+                    'page_scraping_success': 0,
+                    'cloudscraper_success': 0,
+                    'heuristic_success': 0
+                },
+                'cache_size': len(self._validation_cache)
+            }
+        
+        total_successes = (
+            self._validation_stats['api_success'] +
+            self._validation_stats['page_scraping_success'] +
+            self._validation_stats['cloudscraper_success'] +
+            self._validation_stats['heuristic_success']
+        )
+        
+        return {
+            'total_attempts': total_attempts,
+            'cache_hits': self._validation_stats['cache_hits'],
+            'success_rate': (total_successes / total_attempts) * 100,
+            'method_breakdown': {
+                'api_success': self._validation_stats['api_success'],
+                'page_scraping_success': self._validation_stats['page_scraping_success'],
+                'cloudscraper_success': self._validation_stats['cloudscraper_success'],
+                'heuristic_success': self._validation_stats['heuristic_success']
+            },
+            'method_success_rates': {
+                'api_rate': (self._validation_stats['api_success'] / total_attempts) * 100,
+                'page_scraping_rate': (self._validation_stats['page_scraping_success'] / total_attempts) * 100,
+                'cloudscraper_rate': (self._validation_stats['cloudscraper_success'] / total_attempts) * 100,
+                'heuristic_rate': (self._validation_stats['heuristic_success'] / total_attempts) * 100
+            },
+            'cache_size': len(self._validation_cache),
+            'cache_hit_rate': (self._validation_stats['cache_hits'] / total_attempts) * 100 if total_attempts > 0 else 0
+        }
 
     async def scrape_all_sources(self) -> list:
         """
@@ -649,7 +737,6 @@ class MultiSourceCouponScraper:
             loop.run_in_executor(None, self.scrape_real_discount),
             loop.run_in_executor(None, self.scrape_discudemy),
             loop.run_in_executor(None, self.scrape_course_vania),
-            loop.run_in_executor(None, self.scrape_udemy_freebies),
         ]
         
         results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -547,6 +547,11 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
     
+    # Add validation statistics if available
+    if hasattr(context.bot_data, 'validation_stats'):
+        val_stats = context.bot_data['validation_stats']
+        stats_text += f"\n\n🔍 **Validation Stats**:\n   • Success Rate: {val_stats.get('success_rate', 0):.1f}%\n   • Cache Hit Rate: {val_stats.get('cache_hit_rate', 0):.1f}%"
+    
     await update.message.reply_text(stats_text, parse_mode='Markdown')
 
 
@@ -743,6 +748,47 @@ async def resume_fetching_command(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+async def validation_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show detailed validation statistics (admin only)"""
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin access required.")
+        return
+    
+    # Create a temporary scraper to get current validation stats
+    try:
+        from multi_source_scraper import MultiSourceCouponScraper
+        scraper = MultiSourceCouponScraper(validate_coupons=True)
+        val_stats = scraper.get_validation_stats()
+        
+        if val_stats['total_attempts'] == 0:
+            await update.message.reply_text("📊 No validation attempts recorded yet.")
+            return
+        
+        stats_text = f"""🔍 **Coupon Validation Statistics**
+
+📈 **Overall Performance**:
+   • Total Attempts: {val_stats['total_attempts']}
+   • Success Rate: {val_stats['success_rate']:.1f}%
+   • Cache Hits: {val_stats['cache_hits']} ({val_stats['cache_hit_rate']:.1f}%)
+   • Cache Size: {val_stats['cache_size']} entries
+
+🛠️ **Method Breakdown**:
+   • API Success: {val_stats['method_breakdown']['api_success']} ({val_stats['method_success_rates']['api_rate']:.1f}%)
+   • Page Scraping: {val_stats['method_breakdown']['page_scraping_success']} ({val_stats['method_success_rates']['page_scraping_rate']:.1f}%)
+   • CloudScraper: {val_stats['method_breakdown']['cloudscraper_success']} ({val_stats['method_success_rates']['cloudscraper_rate']:.1f}%)
+   • Heuristic: {val_stats['method_breakdown']['heuristic_success']} ({val_stats['method_success_rates']['heuristic_rate']:.1f}%)
+
+💡 **Performance Tips**:
+   • Higher API success = Better performance
+   • High cache hit rate = Efficient duplicate handling
+   • Multiple methods ensure reliability when Udemy blocks API"""
+        
+        await update.message.reply_text(stats_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error getting validation stats: {str(e)}")
+
+
 async def help_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show admin help (admin only)"""
     if not is_admin(update.effective_user.id):
@@ -752,6 +798,7 @@ async def help_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     help_text = """🔧 <b>Admin Commands</b>
 
 📊 <code>/stats</code> - Detailed bot statistics
+🔍 <code>/valstats</code> - Validation method statistics
 🔄 <code>/restart</code> - Restart the bot process
 🛑 <code>/stop</code> - Stop the bot completely
 ⚡ <code>/restart_heroku</code> - Restart Heroku dyno
@@ -764,7 +811,7 @@ async def help_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 🤖 <b>Bot Info</b>:
 • Runs every 2 hours automatically
-• Fetches from 5 sources (RapidAPI + 4 scrapers)
+• Fetches from 4 sources (RapidAPI + 3 scrapers)
 • Validates 100% off coupons via Udemy API
 • Sends only validated free courses to bridge channel
 • Maintains cache to avoid duplicates
@@ -795,6 +842,7 @@ def main():
     
     # Admin command handlers
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("valstats", validation_stats_command))
     application.add_handler(CommandHandler("restart", restart_command))
     application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("restart_heroku", restart_heroku_command))
@@ -826,11 +874,10 @@ def main():
     logger.info("   📡 RapidAPI: 3 pages per check")
     logger.info("   🌐 Real.discount: Free courses")
     logger.info("   🌐 Discudemy: Discounted courses")
-    logger.info("   🌐 CourseVania: Course deals")
-    logger.info("   🌐 UdemyFreebies: Free courses")
+    logger.info("   🌐 CourseVania: Course deals (enhanced retry)")
     logger.info("   ✅ Coupon validation: 100% off only")
     logger.info("📊 API Usage: 36 RapidAPI requests/day (within 100/day limit)")
-    logger.info("📊 Expected: 50-200+ validated courses per check from all sources")
+    logger.info("📊 Expected: 140+ validated courses per check from all sources")
     logger.info(f"🔧 Admin ID: {ADMIN_USER_ID} (use /adminhelp for commands)")
     application.run_polling()
 
